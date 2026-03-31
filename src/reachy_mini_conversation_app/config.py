@@ -168,14 +168,14 @@ class Config:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # The key is downloaded in console.py if needed
 
     # Optional
-    MODEL_NAME = os.getenv("MODEL_NAME", "gpt-realtime")
+    OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-realtime")
     BACKEND_PROVIDER = os.getenv("BACKEND_PROVIDER", "speech-to-speech").strip().lower()
     S2S_REALTIME_SESSION_URL = os.getenv("S2S_REALTIME_SESSION_URL")
     HF_HOME = os.getenv("HF_HOME", "./cache")
     LOCAL_VISION_MODEL = os.getenv("LOCAL_VISION_MODEL", "HuggingFaceTB/SmolVLM2-2.2B-Instruct")
     HF_TOKEN = os.getenv("HF_TOKEN")  # Optional, falls back to hf auth login if not set
 
-    logger.debug(f"Model: {MODEL_NAME}, HF_HOME: {HF_HOME}, Vision Model: {LOCAL_VISION_MODEL}")
+    logger.debug(f"OpenAI model: {OPENAI_MODEL_NAME}, HF_HOME: {HF_HOME}, Vision Model: {LOCAL_VISION_MODEL}")
 
     _profiles_directory_env = os.getenv("REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY")
     PROFILES_DIRECTORY = Path(_profiles_directory_env) if _profiles_directory_env else DEFAULT_PROFILES_DIRECTORY

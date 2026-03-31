@@ -455,7 +455,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
     async def _run_realtime_session(self) -> None:
         """Establish and manage a single realtime session."""
-        async with self.client.realtime.connect(model=config.MODEL_NAME) as conn:
+        async with self.client.realtime.connect(model=config.OPENAI_MODEL_NAME) as conn:
             try:
                 session_config = RealtimeSessionCreateRequestParam(
                     type="realtime",
@@ -790,7 +790,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         fallback = list(AVAILABLE_VOICES)
         try:
             # Best effort discovery; safe-guarded for unexpected shapes
-            model = await self.client.models.retrieve(config.MODEL_NAME)
+            model = await self.client.models.retrieve(config.OPENAI_MODEL_NAME)
             # Try common serialization paths
             raw = None
             for attr in ("model_dump", "to_dict"):
