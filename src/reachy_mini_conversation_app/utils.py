@@ -93,9 +93,16 @@ def initialize_camera_and_vision(
 
             vision_processor = initialize_vision_processor()
         else:
-            logging.getLogger(__name__).info(
-                "Using gpt-realtime for vision (default). Use --local-vision for local processing.",
-            )
+            from reachy_mini_conversation_app.config import config
+
+            if config.BACKEND_PROVIDER == "openai":
+                logging.getLogger(__name__).info(
+                    "Using OpenAI realtime vision (default). Use --local-vision for local processing.",
+                )
+            else:
+                logging.getLogger(__name__).info(
+                    "Using backend-provided vision (default). Use --local-vision for local processing.",
+                )
 
     return camera_worker, vision_processor
 
