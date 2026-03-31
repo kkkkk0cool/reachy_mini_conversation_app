@@ -45,6 +45,7 @@ def run(
     """Run the Reachy Mini conversation app."""
     # Putting these dependencies here makes the dashboard faster to load when the conversation app is installed
     from reachy_mini_conversation_app.moves import MovementManager
+    from reachy_mini_conversation_app.config import config
     from reachy_mini_conversation_app.console import LocalStream
     from reachy_mini_conversation_app.openai_realtime import OpenaiRealtimeHandler
     from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
@@ -143,26 +144,24 @@ def run(
     stream_manager: gr.Blocks | LocalStream | None = None
 
     if args.gradio:
-        api_key_textbox = gr.Textbox(
-            label="OPENAI API Key",
-            type="password",
-            value=os.getenv("OPENAI_API_KEY") if not get_space() else "",
-        )
-
         from reachy_mini_conversation_app.gradio_personality import PersonalityUI
 
         personality_ui = PersonalityUI()
         personality_ui.create_components()
+        additional_inputs = [chatbot, *personality_ui.additional_inputs_ordered()]
+        if config.BACKEND_PROVIDER == "openai":
+            api_key_textbox = gr.Textbox(
+                label="OPENAI API Key",
+                type="password",
+                value=os.getenv("OPENAI_API_KEY") if not get_space() else "",
+            )
+            additional_inputs.insert(1, api_key_textbox)
 
         stream = Stream(
             handler=handler,
             mode="send-receive",
             modality="audio",
-            additional_inputs=[
-                chatbot,
-                api_key_textbox,
-                *personality_ui.additional_inputs_ordered(),
-            ],
+            additional_inputs=additional_inputs,
             additional_outputs=[chatbot],
             additional_outputs_handler=update_chatbot,
             ui_args={"title": "Talk with Reachy Mini"},
