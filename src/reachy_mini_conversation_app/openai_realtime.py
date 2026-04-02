@@ -745,7 +745,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
         # Handle idle
         idle_duration = asyncio.get_event_loop().time() - self.last_activity_time
-        if idle_duration > 30.0 and self._response_done_event.is_set() and self.deps.movement_manager.is_idle():
+        if idle_duration > 180.0 and self._response_done_event.is_set() and self.deps.movement_manager.is_idle():
             try:
                 await self.send_idle_signal(idle_duration)
             except Exception as e:
