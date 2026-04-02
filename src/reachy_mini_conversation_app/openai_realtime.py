@@ -547,6 +547,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     if event.type == "response.done":
                         # Doesn't mean the audio is done playing
                         self._response_done_event.set()
+                        self.is_idle_tool_call = False
                         logger.debug("Response done")
 
                         response = getattr(event, "response", None)
@@ -661,9 +662,6 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                                 },
                             ),
                         )
-
-                        if self.is_idle_tool_call:
-                            self.is_idle_tool_call = False
 
                         logger.info("Started background tool: %s (id=%s, call_id=%s)", tool_name, bg_tool.tool_id, call_id)
 
