@@ -572,6 +572,12 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                         else:
                             input_transcript.deltas.append(delta)
 
+                        current_partial = "".join(input_transcript.deltas)
+                        logger.info(
+                            "Live partial transcript: %s",
+                            current_partial if len(current_partial) < 200 else current_partial[:200] + "…",
+                        )
+
                         sequence_counter = len(input_transcript.deltas) - 1
 
                         # Cancel previous debounce task if it exists
@@ -584,7 +590,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
                         # Start new debounce timer with the last delta
                         self.partial_transcript_task = asyncio.create_task(
-                            self._emit_debounced_partial("".join(input_transcript.deltas), item_id, sequence_counter)
+                            self._emit_debounced_partial(current_partial, item_id, sequence_counter)
                         )
 
                     # Handle completed transcription (user finished speaking)
