@@ -4,7 +4,7 @@ import base64
 import random
 import asyncio
 import logging
-from typing import Any, Final, Tuple, Literal, Optional
+from typing import Any, Final, Tuple, Literal, Optional, cast
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlsplit, parse_qsl, urlunsplit
@@ -475,12 +475,12 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     instructions=get_session_instructions(),
                     audio=RealtimeAudioConfigParam(
                         input=RealtimeAudioConfigInputParam(
-                            format=AudioPCM(type="audio/pcm", rate=self.input_sample_rate),
+                            format=AudioPCM(type="audio/pcm", rate=cast(Any, self.input_sample_rate)),
                             transcription=AudioTranscriptionParam(model="gpt-4o-transcribe", language="en"),
                             turn_detection=ServerVad(type="server_vad", interrupt_response=True),
                         ),
                         output=RealtimeAudioConfigOutputParam(
-                            format=AudioPCM(type="audio/pcm", rate=self.output_sample_rate),
+                            format=AudioPCM(type="audio/pcm", rate=cast(Any, self.output_sample_rate)),
                             voice=get_session_voice(default=DEFAULT_VOICE),
                         ),
                     ),
