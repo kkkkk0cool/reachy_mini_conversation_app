@@ -13,6 +13,7 @@ from reachy_mini_conversation_app.openai_realtime import (
     OpenaiRealtimeHandler,
     _compute_response_cost,
 )
+from reachy_mini_conversation_app.config import DEFAULT_VOICE, config
 from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
 from reachy_mini_conversation_app.tools.background_tool_manager import ToolCallRoutine
 
@@ -27,7 +28,7 @@ def _build_handler(loop: asyncio.AbstractEventLoop) -> OpenaiRealtimeHandler:
 async def test_tool_completion_does_not_reset_head_wobbler(monkeypatch: Any) -> None:
     """Tool completion should not interrupt ongoing speech wobble."""
     monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "test")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=rt_mod.DEFAULT_VOICE: "alloy")
+    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=DEFAULT_VOICE: "alloy")
     monkeypatch.setattr(rt_mod, "get_tool_specs", lambda: [])
 
     async def _fake_dispatch(
@@ -135,7 +136,7 @@ async def test_tool_completion_does_not_reset_head_wobbler(monkeypatch: Any) -> 
 async def test_non_idle_tool_call_does_not_queue_progress_response(monkeypatch: Any) -> None:
     """Tool-call startup should not enqueue a second speech response."""
     monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "test")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=rt_mod.DEFAULT_VOICE: "alloy")
+    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=DEFAULT_VOICE: "alloy")
     monkeypatch.setattr(rt_mod, "get_tool_specs", lambda: [])
 
     class FakeEvent:
@@ -233,7 +234,7 @@ async def test_non_idle_tool_call_does_not_queue_progress_response(monkeypatch: 
 async def test_user_speech_events_reset_idle_timer(monkeypatch: Any) -> None:
     """User speech/transcription events should postpone idle behavior."""
     monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "test")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=rt_mod.DEFAULT_VOICE: "alloy")
+    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=DEFAULT_VOICE: "alloy")
     monkeypatch.setattr(rt_mod, "get_tool_specs", lambda: [])
 
     class FakeEvent:
@@ -307,7 +308,8 @@ async def test_user_speech_events_reset_idle_timer(monkeypatch: Any) -> None:
     movement_manager = MagicMock()
     deps = ToolDependencies(reachy_mini=MagicMock(), movement_manager=movement_manager)
     handler = OpenaiRealtimeHandler(deps)
-    handler.client = FakeClient()
+    fake_client: Any = FakeClient()
+    handler.client = fake_client
     handler.last_activity_time = asyncio.get_running_loop().time() - 60.0
 
     start_up = MagicMock()
@@ -326,7 +328,7 @@ async def test_user_speech_events_reset_idle_timer(monkeypatch: Any) -> None:
 async def test_partial_transcription_uses_latest_snapshot(monkeypatch: Any) -> None:
     """Partial transcription snapshots should replace older snapshots for the same item."""
     monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "test")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=rt_mod.DEFAULT_VOICE: "alloy")
+    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=DEFAULT_VOICE: "alloy")
     monkeypatch.setattr(rt_mod, "get_tool_specs", lambda: [])
 
     class FakeEvent:
@@ -399,7 +401,8 @@ async def test_partial_transcription_uses_latest_snapshot(monkeypatch: Any) -> N
 
     deps = ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock())
     handler = OpenaiRealtimeHandler(deps)
-    handler.client = FakeClient()
+    fake_client: Any = FakeClient()
+    handler.client = fake_client
 
     start_up = MagicMock()
     shutdown = AsyncMock()
@@ -516,7 +519,7 @@ async def test_start_up_retries_on_abrupt_close(monkeypatch: Any, caplog: Any) -
 
     # Patch the OpenAI client used by the handler
     monkeypatch.setattr(rt_mod, "AsyncOpenAI", FakeClient)
-    monkeypatch.setattr(rt_mod.config, "BACKEND_PROVIDER", "openai")
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "openai")
 
     # Build handler with minimal deps
     deps = ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock())
@@ -537,8 +540,8 @@ async def test_start_up_retries_on_abrupt_close(monkeypatch: Any, caplog: Any) -
 @pytest.mark.asyncio
 async def test_start_up_s2s_gradio_does_not_wait_for_api_key(monkeypatch: Any) -> None:
     """Speech-to-speech backend should not wait for gradio key input."""
-    monkeypatch.setattr(rt_mod.config, "BACKEND_PROVIDER", "speech-to-speech")
-    monkeypatch.setattr(rt_mod.config, "OPENAI_API_KEY", None)
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "speech-to-speech")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", None)
 
     deps = ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock())
     handler = rt_mod.OpenaiRealtimeHandler(deps, gradio_mode=True)
@@ -562,10 +565,10 @@ async def test_start_up_s2s_gradio_does_not_wait_for_api_key(monkeypatch: Any) -
 async def test_run_realtime_session_uses_default_voice_for_lb_allocated_sessions(monkeypatch: Any) -> None:
     """Use the backend default speaker when no profile voice is selected for the s2s LB."""
     monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "test")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=rt_mod.DEFAULT_VOICE: default)
+    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=DEFAULT_VOICE: default)
     monkeypatch.setattr(rt_mod, "get_tool_specs", lambda: [])
-    monkeypatch.setattr(rt_mod.config, "BACKEND_PROVIDER", "speech-to-speech")
-    monkeypatch.setattr(rt_mod.config, "S2S_REALTIME_SESSION_URL", "https://lb.example.test/session")
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "speech-to-speech")
+    monkeypatch.setattr(config, "S2S_REALTIME_SESSION_URL", "https://lb.example.test/session")
 
     captured_update: dict[str, Any] = {}
 
@@ -622,22 +625,24 @@ async def test_run_realtime_session_uses_default_voice_for_lb_allocated_sessions
 
     deps = ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock())
     handler = OpenaiRealtimeHandler(deps)
-    handler.client = FakeClient()
+    fake_client: Any = FakeClient()
+    handler.client = fake_client
 
     await handler._run_realtime_session()
 
     session = captured_update["session"]
-    assert session["audio"]["input"]["format"]["rate"] == 16000
-    assert session["audio"]["output"]["format"]["rate"] == 16000
+    # S2S at 16 kHz passes None so the backend uses its optimal default (16 kHz).
+    assert session["audio"]["input"]["format"]["rate"] is None
+    assert session["audio"]["output"]["format"]["rate"] is None
     output = session["audio"]["output"]
-    assert output["voice"] == rt_mod.DEFAULT_VOICE
+    assert output["voice"] == DEFAULT_VOICE
 
 
 @pytest.mark.asyncio
 async def test_run_realtime_session_passes_allocated_session_query(monkeypatch: Any) -> None:
     """Speech-to-speech sessions must forward the allocated session token to the websocket connect call."""
     monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "test")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=rt_mod.DEFAULT_VOICE: default)
+    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=DEFAULT_VOICE: default)
     monkeypatch.setattr(rt_mod, "get_tool_specs", lambda: [])
 
     captured_connect: dict[str, Any] = {}
@@ -695,7 +700,8 @@ async def test_run_realtime_session_passes_allocated_session_query(monkeypatch: 
             self.realtime = FakeRealtime()
 
     handler = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
-    handler.client = FakeClient()
+    fake_client: Any = FakeClient()
+    handler.client = fake_client
     handler._realtime_connect_query = {"session_token": "abc123"}
 
     await handler._run_realtime_session()
@@ -706,7 +712,7 @@ async def test_run_realtime_session_passes_allocated_session_query(monkeypatch: 
 @pytest.mark.asyncio
 async def test_handler_uses_openai_sample_rate_for_openai_backend(monkeypatch: Any) -> None:
     """OpenAI backend should keep the 24 kHz realtime audio configuration."""
-    monkeypatch.setattr(rt_mod.config, "BACKEND_PROVIDER", "openai")
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "openai")
 
     handler = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
 
@@ -718,9 +724,9 @@ async def test_handler_uses_openai_sample_rate_for_openai_backend(monkeypatch: A
 async def test_apply_personality_uses_selected_voice_for_lb_allocated_sessions(monkeypatch: Any) -> None:
     """Live personality updates should honor the selected Qwen CustomVoice speaker."""
     monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "new instructions")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=rt_mod.DEFAULT_VOICE: "Serena")
-    monkeypatch.setattr(rt_mod.config, "BACKEND_PROVIDER", "speech-to-speech")
-    monkeypatch.setattr(rt_mod.config, "S2S_REALTIME_SESSION_URL", "https://lb.example.test/session")
+    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=DEFAULT_VOICE: "Serena")
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "speech-to-speech")
+    monkeypatch.setattr(config, "S2S_REALTIME_SESSION_URL", "https://lb.example.test/session")
 
     captured_update: dict[str, Any] = {}
 
@@ -732,7 +738,7 @@ async def test_apply_personality_uses_selected_voice_for_lb_allocated_sessions(m
         session = FakeSession()
 
     handler = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
-    handler.connection = FakeConnection()  # type: ignore[assignment]
+    handler.connection = FakeConnection()
     monkeypatch.setattr(handler, "_restart_session", AsyncMock(return_value=None))
 
     result = await handler.apply_personality("example")
@@ -812,7 +818,7 @@ async def test_response_sender_retries_when_active_response_error_uses_type_only
     """
     caplog.set_level(logging.DEBUG)
     monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "test")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=rt_mod.DEFAULT_VOICE: "alloy")
+    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=DEFAULT_VOICE: "alloy")
     monkeypatch.setattr(rt_mod, "get_tool_specs", lambda: [])
 
     event_queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -908,7 +914,8 @@ async def test_response_sender_retries_when_active_response_error_uses_type_only
             self.realtime = FakeRealtime()
 
     handler = rt_mod.OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
-    handler.client = FakeClient()
+    fake_client: Any = FakeClient()
+    handler.client = fake_client
 
     session_task = asyncio.create_task(handler._run_realtime_session())
     await asyncio.sleep(0)
@@ -946,7 +953,7 @@ async def test_response_sender_retries_on_active_response_rejection(monkeypatch:
     FakeCCE = type("FakeCCE", (Exception,), {})
     monkeypatch.setattr(rt_mod, "ConnectionClosedError", FakeCCE)
     monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "test")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=rt_mod.DEFAULT_VOICE: "alloy")
+    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=DEFAULT_VOICE: "alloy")
     monkeypatch.setattr(rt_mod, "get_tool_specs", lambda: [])
 
     N_TOOL_RESULTS = 400
@@ -1100,7 +1107,7 @@ async def test_response_sender_retries_on_active_response_rejection(monkeypatch:
             self.realtime = FakeRealtime()
 
     monkeypatch.setattr(rt_mod, "AsyncOpenAI", FakeClient)
-    monkeypatch.setattr(rt_mod.config, "BACKEND_PROVIDER", "openai")
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "openai")
 
     # Patch dispatch_tool_call so tools complete with a result.
     async def _fake_dispatch(

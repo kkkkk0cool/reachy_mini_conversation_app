@@ -4,7 +4,7 @@ import base64
 import random
 import asyncio
 import logging
-from typing import Any, Final, Tuple, Literal, Optional, cast
+from typing import Any, Final, Tuple, Literal, Optional
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlsplit, parse_qsl, urlunsplit
@@ -137,6 +137,38 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         if config.BACKEND_PROVIDER == "speech-to-speech":
             return S2S_REALTIME_SAMPLE_RATE
         return OPENAI_REALTIME_SAMPLE_RATE
+
+    def _get_openai_session_audio_rates(self) -> tuple[Literal[24000] | None, Literal[24000] | None]:
+        """Return ``(input_rate, output_rate)`` for the openai realtime session config.
+
+        The OpenAI realtime API mandates 24 kHz or None.  The S2S backend
+        also accepts 24 kHz but performs best at 16 kHz; passing ``None``
+        lets it default to that optimal rate while still satisfying the
+        OpenAI SDK contract (which requires 24 kHz or None). The S2S backend
+        will default to 16 kHz if None is passed.
+
+        OpenAI SDK Server-side contract:
+        https://github.com/openai/openai-python/blob/58184ad545ee2abd98e171ee09766f259d7f38cd/src/openai/types/realtime/realtime_audio_formats.py#L12
+
+        """
+        input_rate: int | None = self.input_sample_rate
+        output_rate: int | None = self.output_sample_rate
+        if config.BACKEND_PROVIDER == "speech-to-speech":
+            if self.input_sample_rate == 16000:
+                input_rate = None
+            if self.output_sample_rate == 16000:
+                output_rate = None
+        s2s_hint = (
+            " To use the S2S backend optimal default rate (16 kHz), use an internal application sample rate of 16 kHz"
+            " and pass None to the OpenAI realtime session config. None will be interpreted by the S2S backend as defaulting to 16 kHz."
+            if config.BACKEND_PROVIDER == "speech-to-speech"
+            else ""
+        )
+        assert input_rate in (24000, None) and output_rate in (24000, None), (
+            f"OpenAI realtime session requires 24 kHz or None, "
+            f"got input_rate={input_rate!r}, output_rate={output_rate!r}.{s2s_hint}"
+        )
+        return input_rate, output_rate # type: ignore[return-value]
 
     def _mark_activity(self, reason: str) -> None:
         """Record non-idle conversation activity for the idle timer."""
@@ -465,6 +497,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
     async def _run_realtime_session(self) -> None:
         """Establish and manage a single realtime session."""
+        input_rate, output_rate = self._get_openai_session_audio_rates()
         async with self.client.realtime.connect(
             model=config.OPENAI_MODEL_NAME,
             extra_query=self._realtime_connect_query,
@@ -475,12 +508,12 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     instructions=get_session_instructions(),
                     audio=RealtimeAudioConfigParam(
                         input=RealtimeAudioConfigInputParam(
-                            format=AudioPCM(type="audio/pcm", rate=cast(Any, self.input_sample_rate)),
+                            format=AudioPCM(type="audio/pcm", rate=input_rate), # type: ignore[typeddict-item]
                             transcription=AudioTranscriptionParam(model="gpt-4o-transcribe", language="en"),
                             turn_detection=ServerVad(type="server_vad", interrupt_response=True),
                         ),
                         output=RealtimeAudioConfigOutputParam(
-                            format=AudioPCM(type="audio/pcm", rate=cast(Any, self.output_sample_rate)),
+                            format=AudioPCM(type="audio/pcm", rate=output_rate), # type: ignore[typeddict-item]
                             voice=get_session_voice(default=DEFAULT_VOICE),
                         ),
                     ),
