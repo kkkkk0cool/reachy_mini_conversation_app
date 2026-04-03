@@ -9,11 +9,11 @@ import pytest
 
 import reachy_mini_conversation_app.openai_realtime as rt_mod
 import reachy_mini_conversation_app.tools.background_tool_manager as btm_mod
+from reachy_mini_conversation_app.config import DEFAULT_VOICE, config
 from reachy_mini_conversation_app.openai_realtime import (
     OpenaiRealtimeHandler,
     _compute_response_cost,
 )
-from reachy_mini_conversation_app.config import DEFAULT_VOICE, config
 from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
 from reachy_mini_conversation_app.tools.background_tool_manager import ToolCallRoutine
 

@@ -97,6 +97,7 @@ def get_session_voice(default: str = DEFAULT_VOICE) -> str:
     If a custom profile is selected and contains a voice.txt, return its
     trimmed content; otherwise return the provided default ("cedar").
     """
+    return "af_heart"
     profile = config.REACHY_MINI_CUSTOM_PROFILE
     if not profile:
         return default
