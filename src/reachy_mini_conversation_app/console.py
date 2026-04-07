@@ -17,6 +17,7 @@ import logging
 from typing import List, Optional
 from pathlib import Path
 
+import numpy as np
 from fastrtc import AdditionalOutputs, audio_to_float32
 from scipy.signal import resample
 
@@ -503,12 +504,27 @@ class LocalStream:
             logger.debug("GI/GStreamer unavailable while pushing local audio; falling back to MediaManager")
             return False
 
-        num_samples = int(audio_frame.shape[0]) if getattr(audio_frame, "ndim", 0) > 0 else 0
-        if num_samples <= 0:
+        if getattr(audio_frame, "ndim", 0) > 2 or getattr(audio_frame, "ndim", 0) == 0:
+            return False
+
+        adapted_frame = audio_frame
+        if adapted_frame.ndim == 2 and adapted_frame.shape[1] > adapted_frame.shape[0]:
+            adapted_frame = adapted_frame.T
+
+        output_channels = self._robot.media.get_output_channels()
+        if adapted_frame.ndim == 1 and output_channels > 1:
+            adapted_frame = np.column_stack((adapted_frame,) * output_channels)
+        elif adapted_frame.ndim == 2 and adapted_frame.shape[1] < output_channels:
+            adapted_frame = np.column_stack((adapted_frame[:, 0],) * output_channels)
+        elif adapted_frame.ndim == 2 and adapted_frame.shape[1] > output_channels:
+            adapted_frame = adapted_frame[:, :output_channels]
+
+        num_frames = int(adapted_frame.shape[0]) if getattr(adapted_frame, "ndim", 0) > 0 else 0
+        if num_frames <= 0:
             return True
 
-        duration_ns = (num_samples * Gst.SECOND) // output_sample_rate
-        buf = Gst.Buffer.new_wrapped(audio_frame.tobytes())
+        duration_ns = (num_frames * Gst.SECOND) // output_sample_rate
+        buf = Gst.Buffer.new_wrapped(adapted_frame.tobytes())
         buf.pts = self._gstreamer_appsrc_pts_ns
         buf.duration = duration_ns
         self._gstreamer_appsrc_pts_ns += duration_ns
