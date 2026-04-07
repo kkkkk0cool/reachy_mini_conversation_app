@@ -77,7 +77,7 @@ def test_clear_audio_queue_falls_back_when_backend_is_unknown() -> None:
 
 
 def test_push_local_gstreamer_audio_sets_pts_and_duration(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Local GStreamer playback should adapt channels and timestamp buffers explicitly."""
+    """Local GStreamer playback should timestamp buffers explicitly."""
 
     class FakeBuffer:
         def __init__(self, payload: bytes) -> None:
@@ -95,13 +95,7 @@ def test_push_local_gstreamer_audio_sets_pts_and_duration(monkeypatch: pytest.Mo
 
     handler = MagicMock()
     appsrc = MagicMock()
-    robot = SimpleNamespace(
-        media=SimpleNamespace(
-            audio=SimpleNamespace(_appsrc=appsrc),
-            backend=MediaBackend.LOCAL,
-            get_output_channels=MagicMock(return_value=2),
-        )
-    )
+    robot = SimpleNamespace(media=SimpleNamespace(audio=SimpleNamespace(_appsrc=appsrc), backend=MediaBackend.LOCAL))
     stream = LocalStream(handler, robot)
     monkeypatch.setattr("reachy_mini_conversation_app.console._load_gst", lambda: FakeGst)
 
@@ -110,8 +104,7 @@ def test_push_local_gstreamer_audio_sets_pts_and_duration(monkeypatch: pytest.Mo
     assert stream._push_local_gstreamer_audio(audio_frame, output_sample_rate=16000) is True
 
     pushed = appsrc.push_buffer.call_args.args[0]
-    expected = np.column_stack((audio_frame, audio_frame)).tobytes()
-    assert pushed.payload == expected
+    assert pushed.payload == audio_frame.tobytes()
     assert pushed.pts == 0
     assert pushed.duration == 250_000
     assert stream._gstreamer_appsrc_pts_ns == 250_000
@@ -136,13 +129,7 @@ def test_push_local_gstreamer_audio_accumulates_pts(monkeypatch: pytest.MonkeyPa
 
     handler = MagicMock()
     appsrc = MagicMock()
-    robot = SimpleNamespace(
-        media=SimpleNamespace(
-            audio=SimpleNamespace(_appsrc=appsrc),
-            backend=MediaBackend.LOCAL,
-            get_output_channels=MagicMock(return_value=2),
-        )
-    )
+    robot = SimpleNamespace(media=SimpleNamespace(audio=SimpleNamespace(_appsrc=appsrc), backend=MediaBackend.LOCAL))
     stream = LocalStream(handler, robot)
     monkeypatch.setattr("reachy_mini_conversation_app.console._load_gst", lambda: FakeGst)
 
@@ -164,13 +151,7 @@ def test_push_local_gstreamer_audio_returns_false_when_gst_is_unavailable(
     """The workaround should fall back cleanly when GI bindings are unavailable."""
     handler = MagicMock()
     appsrc = MagicMock()
-    robot = SimpleNamespace(
-        media=SimpleNamespace(
-            audio=SimpleNamespace(_appsrc=appsrc),
-            backend=MediaBackend.LOCAL,
-            get_output_channels=MagicMock(return_value=2),
-        )
-    )
+    robot = SimpleNamespace(media=SimpleNamespace(audio=SimpleNamespace(_appsrc=appsrc), backend=MediaBackend.LOCAL))
     stream = LocalStream(handler, robot)
     monkeypatch.setattr("reachy_mini_conversation_app.console._load_gst", lambda: None)
 
@@ -184,13 +165,7 @@ def test_push_local_gstreamer_audio_returns_false_for_non_local_backend(
     """Only local GStreamer playback should use explicit Gst timestamps."""
     handler = MagicMock()
     appsrc = MagicMock()
-    robot = SimpleNamespace(
-        media=SimpleNamespace(
-            audio=SimpleNamespace(_appsrc=appsrc),
-            backend=MediaBackend.WEBRTC,
-            get_output_channels=MagicMock(return_value=2),
-        )
-    )
+    robot = SimpleNamespace(media=SimpleNamespace(audio=SimpleNamespace(_appsrc=appsrc), backend=MediaBackend.WEBRTC))
     stream = LocalStream(handler, robot)
     monkeypatch.setattr("reachy_mini_conversation_app.console._load_gst", MagicMock())
 
