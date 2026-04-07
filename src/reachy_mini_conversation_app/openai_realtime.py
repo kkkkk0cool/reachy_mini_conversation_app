@@ -131,11 +131,6 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         self._response_done_event: asyncio.Event = asyncio.Event()
         self._response_done_event.set()
         self._last_response_rejected: bool = False
-        self._audio_debug_response_index: int = 0
-        self._audio_debug_chunk_count: int = 0
-        self._audio_debug_total_samples: int = 0
-        self._audio_debug_first_chunk_samples: int | None = None
-        self._audio_debug_response_created_at: float | None = None
         self._assistant_audio_dump_enabled = logging.getLogger().isEnabledFor(logging.DEBUG)
         self._assistant_audio_dump_dir = self._resolve_assistant_audio_dump_dir(instance_path)
         self._assistant_audio_dump_stream_index = 0
@@ -642,11 +637,6 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                         self._flush_assistant_audio_dump("orphaned")
                         self._mark_activity("response_created")
                         self._response_done_event.clear()
-                        self._audio_debug_response_index += 1
-                        self._audio_debug_chunk_count = 0
-                        self._audio_debug_total_samples = 0
-                        self._audio_debug_first_chunk_samples = None
-                        self._audio_debug_response_created_at = asyncio.get_event_loop().time()
                         logger.debug("Response created (active)")
 
                     if event.type == "response.done":
@@ -721,27 +711,6 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                         decoded_pcm_bytes = base64.b64decode(event.delta)
                         self._append_assistant_audio_dump_chunk(decoded_pcm_bytes)
                         decoded_pcm = np.frombuffer(decoded_pcm_bytes, dtype=np.int16).reshape(1, -1)
-                        chunk_samples = int(decoded_pcm.shape[-1])
-                        self._audio_debug_chunk_count += 1
-                        self._audio_debug_total_samples += chunk_samples
-                        if self._audio_debug_first_chunk_samples is None:
-                            self._audio_debug_first_chunk_samples = chunk_samples
-                        if self._audio_debug_chunk_count <= 3:
-                            delay_ms = None
-                            if self._audio_debug_response_created_at is not None:
-                                delay_ms = 1000.0 * (
-                                    asyncio.get_event_loop().time() - self._audio_debug_response_created_at
-                                )
-                            logger.debug(
-                                "Assistant audio delta: response=%d chunk=%d samples=%d duration_ms=%.1f sample_rate=%d "
-                                "delay_since_response_ms=%s",
-                                self._audio_debug_response_index,
-                                self._audio_debug_chunk_count,
-                                chunk_samples,
-                                1000.0 * chunk_samples / self.output_sample_rate,
-                                self.output_sample_rate,
-                                f"{delay_ms:.1f}" if delay_ms is not None else "n/a",
-                            )
                         if self.deps.head_wobbler is not None:
                             self.deps.head_wobbler.feed(event.delta, sample_rate=self.output_sample_rate)
                         self._mark_activity("assistant_audio_delta")
@@ -753,19 +722,6 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                         )
                     if event.type == "response.output_audio.done":
                         self._flush_assistant_audio_dump("complete")
-                        logger.debug(
-                            "Assistant audio stream finished: response=%d chunks=%d total_duration_ms=%.1f "
-                            "first_chunk_duration_ms=%s sample_rate=%d",
-                            self._audio_debug_response_index,
-                            self._audio_debug_chunk_count,
-                            1000.0 * self._audio_debug_total_samples / self.output_sample_rate,
-                            (
-                                f"{1000.0 * self._audio_debug_first_chunk_samples / self.output_sample_rate:.1f}"
-                                if self._audio_debug_first_chunk_samples is not None
-                                else "n/a"
-                            ),
-                            self.output_sample_rate,
-                        )
 
                     # ---- tool-calling plumbing ----
                     if event.type == "response.function_call_arguments.done":

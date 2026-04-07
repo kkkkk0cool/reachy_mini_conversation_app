@@ -70,9 +70,6 @@ class LocalStream:
         self._instance_path: Optional[str] = instance_path
         self._settings_initialized = False
         self._asyncio_loop = None
-        self._playback_debug_segment_index = 0
-        self._playback_debug_chunk_count = 0
-        self._playback_debug_last_push_ts: float | None = None
 
     # ---- Settings UI (only when API key is missing) ----
     def _read_env_lines(self, env_path: Path) -> list[str]:
@@ -495,11 +492,6 @@ class LocalStream:
             elif isinstance(handler_output, tuple):
                 input_sample_rate, audio_data = handler_output
                 output_sample_rate = self._robot.media.get_output_audio_samplerate()
-                now = time.monotonic()
-
-                if self._playback_debug_last_push_ts is None or now - self._playback_debug_last_push_ts > 0.2:
-                    self._playback_debug_segment_index += 1
-                    self._playback_debug_chunk_count = 0
 
                 # Reshape if needed
                 if audio_data.ndim == 2:
@@ -512,29 +504,12 @@ class LocalStream:
 
                 # Cast if needed
                 audio_frame = audio_to_float32(audio_data)
-                input_samples = len(audio_frame)
 
                 # Resample if needed
                 if input_sample_rate != output_sample_rate:
                     audio_frame = resample(
                         audio_frame,
                         int(len(audio_frame) * output_sample_rate / input_sample_rate),
-                    )
-
-                self._playback_debug_chunk_count += 1
-                self._playback_debug_last_push_ts = now
-                if self._playback_debug_chunk_count <= 3:
-                    logger.debug(
-                        "Assistant playback chunk: segment=%d chunk=%d input_samples=%d input_ms=%.1f "
-                        "output_samples=%d output_ms=%.1f input_rate=%d output_rate=%d",
-                        self._playback_debug_segment_index,
-                        self._playback_debug_chunk_count,
-                        input_samples,
-                        1000.0 * input_samples / input_sample_rate,
-                        len(audio_frame),
-                        1000.0 * len(audio_frame) / output_sample_rate,
-                        input_sample_rate,
-                        output_sample_rate,
                     )
                 self._robot.media.push_audio_sample(audio_frame)
 
