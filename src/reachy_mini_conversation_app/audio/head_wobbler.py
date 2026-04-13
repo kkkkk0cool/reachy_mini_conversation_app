@@ -14,7 +14,7 @@ from numpy.typing import NDArray
 from reachy_mini_conversation_app.audio.speech_tapper import HOP_MS, SwayRollRT
 
 
-MOVEMENT_LATENCY_S = 0.2  # seconds between audio and robot movement
+MOVEMENT_LATENCY_S = 0.07  # seconds between audio and robot movement
 logger = logging.getLogger(__name__)
 
 
