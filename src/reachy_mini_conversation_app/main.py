@@ -55,9 +55,14 @@ def run(
         get_backend_label,
         refresh_runtime_config_from_env,
     )
+    from reachy_mini_conversation_app.startup_settings import (
+        StartupSettings,
+        load_startup_settings_into_runtime,
+    )
 
     logger = setup_logger(args.debug)
     logger.info("Starting Reachy Mini Conversation App")
+    startup_settings = StartupSettings()
 
     if instance_path is not None:
         try:
@@ -70,6 +75,11 @@ def run(
                 logger.info("Loaded instance configuration from %s", env_path)
         except Exception as e:
             logger.warning("Failed to load instance configuration: %s", e)
+
+        try:
+            startup_settings = load_startup_settings_into_runtime(instance_path)
+        except Exception as e:
+            logger.warning("Failed to load startup settings: %s", e)
 
     logger.info(
         "Configured backend provider: %s (%s), model: %s",
@@ -163,7 +173,12 @@ def run(
             "Using %s via GeminiLiveHandler",
             get_backend_label(config.BACKEND_PROVIDER),
         )
-        handler = GeminiLiveHandler(deps, gradio_mode=args.gradio, instance_path=instance_path)
+        handler = GeminiLiveHandler(
+            deps,
+            gradio_mode=args.gradio,
+            instance_path=instance_path,
+            startup_voice=startup_settings.voice,
+        )
     else:
         from reachy_mini_conversation_app.openai_realtime import OpenaiRealtimeHandler
 
@@ -177,7 +192,12 @@ def run(
             get_backend_label(config.BACKEND_PROVIDER),
             transport_label,
         )
-        handler = OpenaiRealtimeHandler(deps, gradio_mode=args.gradio, instance_path=instance_path)  # type: ignore[assignment]
+        handler = OpenaiRealtimeHandler(
+            deps,
+            gradio_mode=args.gradio,
+            instance_path=instance_path,
+            startup_voice=startup_settings.voice,
+        )  # type: ignore[assignment]
 
     stream_manager: gr.Blocks | LocalStream | None = None
 

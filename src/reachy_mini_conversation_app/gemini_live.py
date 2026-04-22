@@ -121,10 +121,32 @@ def _resolve_gemini_voice(profile_voice: str) -> str:
     return voice_map.get(profile_voice.lower(), DEFAULT_VOICE_BY_BACKEND[GEMINI_BACKEND])
 
 
+def _resolve_gemini_startup_voice(voice: str | None) -> str | None:
+    """Return a valid persisted Gemini startup voice or None."""
+    if voice is None:
+        return None
+
+    voice_map = {candidate.lower(): candidate for candidate in GEMINI_AVAILABLE_VOICES}
+    resolved = voice_map.get(voice.lower())
+    if resolved is None:
+        logger.warning(
+            "Ignoring persisted Gemini startup voice %r; expected one of %s",
+            voice,
+            GEMINI_AVAILABLE_VOICES,
+        )
+    return resolved
+
+
 class GeminiLiveHandler(AsyncStreamHandler):
     """Gemini Live API handler for fastrtc Stream."""
 
-    def __init__(self, deps: ToolDependencies, gradio_mode: bool = False, instance_path: Optional[str] = None):
+    def __init__(
+        self,
+        deps: ToolDependencies,
+        gradio_mode: bool = False,
+        instance_path: Optional[str] = None,
+        startup_voice: Optional[str] = None,
+    ):
         """Initialize the handler."""
         super().__init__(
             expected_layout="mono",
@@ -135,7 +157,7 @@ class GeminiLiveHandler(AsyncStreamHandler):
         self.deps = deps
         self.gradio_mode = gradio_mode
         self.instance_path = instance_path
-        self._voice_override: str | None = None
+        self._voice_override: str | None = _resolve_gemini_startup_voice(startup_voice)
 
         self.session: Any = None  # google.genai live session
         self.output_queue: "asyncio.Queue[Tuple[int, NDArray[np.int16]] | AdditionalOutputs]" = asyncio.Queue()
@@ -162,7 +184,12 @@ class GeminiLiveHandler(AsyncStreamHandler):
 
     def copy(self) -> "GeminiLiveHandler":
         """Create a copy of the handler."""
-        return GeminiLiveHandler(self.deps, self.gradio_mode, self.instance_path)
+        return GeminiLiveHandler(
+            self.deps,
+            self.gradio_mode,
+            self.instance_path,
+            startup_voice=self._voice_override,
+        )
 
     def _set_listening_state(self, listening: bool) -> None:
         """Avoid queueing redundant listening-state updates."""
@@ -217,7 +244,6 @@ class GeminiLiveHandler(AsyncStreamHandler):
             from reachy_mini_conversation_app.config import set_custom_profile
 
             set_custom_profile(profile)
-            self._voice_override = None
             logger.info("Set custom profile to %r", profile)
 
             try:

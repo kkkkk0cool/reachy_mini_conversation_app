@@ -232,6 +232,22 @@ def test_headless_personality_routes_return_gemini_voices_when_backend_selected(
     assert response.json() == GEMINI_AVAILABLE_VOICES
 
 
+def test_headless_personality_routes_load_builtin_default_tools() -> None:
+    """Headless personality UI should expose built-in default tools on initial load."""
+    app = FastAPI()
+    handler = MagicMock()
+    mount_personality_routes(app, handler, lambda: None)
+
+    client = TestClient(app)
+    response = client.get("/personalities/load", params={"name": "(built-in default)"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["tools_text"]
+    assert "dance" in data["enabled_tools"]
+    assert "camera" in data["enabled_tools"]
+
+
 def test_headless_personality_routes_apply_voice_accepts_query_param() -> None:
     """Headless personality UI should apply a voice change from a POST query param."""
     app = FastAPI()
@@ -263,3 +279,51 @@ def test_headless_personality_routes_apply_voice_accepts_query_param() -> None:
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=1.0)
         loop.close()
+
+
+def test_headless_personality_routes_persist_startup_with_voice_override() -> None:
+    """Saving a startup personality should persist the active manual voice override."""
+    app = FastAPI()
+    handler = MagicMock()
+    handler.apply_personality = AsyncMock(return_value="Applied personality and restarted realtime session.")
+    handler.get_current_voice = MagicMock(return_value="shimmer")
+    persist_personality = MagicMock()
+
+    loop = asyncio.new_event_loop()
+    started = threading.Event()
+
+    def _run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        started.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=_run_loop, daemon=True)
+    thread.start()
+    started.wait(timeout=1.0)
+
+    try:
+        mount_personality_routes(app, handler, lambda: loop, persist_personality=persist_personality)
+
+        client = TestClient(app)
+        response = client.post("/personalities/apply?name=sorry_bro&persist=1")
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        handler.apply_personality.assert_awaited_once_with("sorry_bro")
+        persist_personality.assert_called_once_with("sorry_bro", "shimmer")
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=1.0)
+        loop.close()
+
+
+def test_local_stream_persist_personality_stores_voice_override(tmp_path) -> None:
+    """Persisting startup settings should write both profile and voice override."""
+    stream = LocalStream(MagicMock(), MagicMock(), instance_path=str(tmp_path))
+
+    stream._persist_personality("sorry_bro", "shimmer")
+
+    settings_path = tmp_path / "startup_settings.json"
+    assert settings_path.exists()
+    assert settings_path.read_text(encoding="utf-8") == '{\n  "profile": "sorry_bro",\n  "voice": "shimmer"\n}\n'
+    assert stream._read_persisted_personality() == "sorry_bro"

@@ -36,6 +36,7 @@ from openai.types.realtime.realtime_audio_input_turn_detection_param import Serv
 from reachy_mini_conversation_app.config import (
     S2S_BACKEND,
     OPENAI_BACKEND,
+    AVAILABLE_VOICES,
     config,
     get_default_voice_for_backend,
     get_available_voices_for_backend,
@@ -86,10 +87,25 @@ def _compute_response_cost(usage: Any) -> float:
     return cost
 
 
+def _normalize_startup_voice(voice: str | None) -> str | None:
+    """Return a valid persisted OpenAI startup voice or None."""
+    if voice in AVAILABLE_VOICES:
+        return voice
+    if voice:
+        logger.warning("Ignoring persisted OpenAI startup voice %r; expected one of %s", voice, AVAILABLE_VOICES)
+    return None
+
+
 class OpenaiRealtimeHandler(AsyncStreamHandler):
     """An OpenAI realtime handler for fastrtc Stream."""
 
-    def __init__(self, deps: ToolDependencies, gradio_mode: bool = False, instance_path: Optional[str] = None):
+    def __init__(
+        self,
+        deps: ToolDependencies,
+        gradio_mode: bool = False,
+        instance_path: Optional[str] = None,
+        startup_voice: Optional[str] = None,
+    ):
         """Initialize the handler."""
         sample_rate = self._get_realtime_sample_rate()
         super().__init__(
@@ -112,7 +128,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         self.is_idle_tool_call = False
         self.gradio_mode = gradio_mode
         self.instance_path = instance_path
-        self._voice_override: str | None = None
+        self._voice_override: str | None = _normalize_startup_voice(startup_voice)
         # Track how the API key was provided (env vs textbox) and its value
         self._key_source: Literal["env", "textbox"] = "env"
         self._provided_api_key: str | None = None
@@ -256,7 +272,12 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
     def copy(self) -> "OpenaiRealtimeHandler":
         """Create a copy of the handler."""
-        return OpenaiRealtimeHandler(self.deps, self.gradio_mode, self.instance_path)
+        return OpenaiRealtimeHandler(
+            self.deps,
+            self.gradio_mode,
+            self.instance_path,
+            startup_voice=self._voice_override,
+        )
 
     async def change_voice(self, voice: str) -> str:
         """Change only the voice and restart the session."""
@@ -289,7 +310,6 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             from reachy_mini_conversation_app.config import set_custom_profile
 
             set_custom_profile(profile)
-            self._voice_override = None
             logger.info(
                 "Set custom profile to %r (config=%r)", profile, getattr(_config, "REACHY_MINI_CUSTOM_PROFILE", None)
             )

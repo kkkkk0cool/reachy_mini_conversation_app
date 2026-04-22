@@ -641,6 +641,52 @@ async def test_emit_skips_idle_signal_while_response_active(monkeypatch: Any) ->
     send_idle_signal.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_apply_personality_preserves_manual_voice_override(monkeypatch: Any) -> None:
+    """Applying a profile should not discard a voice manually selected in the current session."""
+    monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "test")
+    monkeypatch.setattr(rt_mod, "get_session_voice", lambda: "cedar")
+    monkeypatch.setattr("reachy_mini_conversation_app.config.set_custom_profile", lambda _profile: None)
+
+    handler = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    update = AsyncMock()
+    handler.connection = SimpleNamespace(session=SimpleNamespace(update=update))
+    handler._voice_override = "marin"
+    restart = AsyncMock()
+    monkeypatch.setattr(handler, "_restart_session", restart)
+
+    status = await handler.apply_personality("example")
+
+    assert status == "Applied personality and restarted realtime session."
+    assert handler.get_current_voice() == "marin"
+    restart.assert_awaited_once()
+    session = update.await_args.kwargs["session"]
+    assert session["audio"]["output"]["voice"] == "marin"
+
+
+def test_handler_uses_startup_voice_at_startup() -> None:
+    """OpenAI handler startup should restore a persisted startup voice."""
+    handler = OpenaiRealtimeHandler(
+        ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()),
+        startup_voice="shimmer",
+    )
+
+    assert handler.get_current_voice() == "shimmer"
+
+
+def test_copy_preserves_current_voice_override() -> None:
+    """Copied OpenAI handlers should keep the current voice override."""
+    handler = OpenaiRealtimeHandler(
+        ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()),
+        startup_voice="shimmer",
+    )
+    handler._voice_override = "marin"
+
+    copied_handler = handler.copy()
+
+    assert copied_handler.get_current_voice() == "marin"
+
+
 def test_format_timestamp_uses_wall_clock() -> None:
     """Test that format_timestamp uses wall clock time."""
     loop = asyncio.new_event_loop()
