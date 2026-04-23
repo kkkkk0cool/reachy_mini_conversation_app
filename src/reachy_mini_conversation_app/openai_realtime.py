@@ -38,6 +38,8 @@ from reachy_mini_conversation_app.config import (
     OPENAI_BACKEND,
     AVAILABLE_VOICES,
     config,
+    get_s2s_session_url,
+    get_s2s_direct_ws_url,
     get_default_voice_for_backend,
     get_available_voices_for_backend,
 )
@@ -94,6 +96,42 @@ def _normalize_startup_voice(voice: str | None) -> str | None:
     if voice:
         logger.warning("Ignoring persisted OpenAI startup voice %r; expected one of %s", voice, AVAILABLE_VOICES)
     return None
+
+
+def _build_openai_compatible_client_from_realtime_url(
+    realtime_url: str,
+    api_key: str | None,
+) -> tuple[AsyncOpenAI, dict[str, str]]:
+    """Build an OpenAI-compatible realtime client from a direct websocket/base URL."""
+    parsed = urlsplit(realtime_url)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"ws", "wss", "http", "https"}:
+        raise ValueError(
+            "Expected speech-to-speech realtime URL to start with ws://, wss://, http://, or https://, "
+            f"got: {realtime_url}"
+        )
+
+    path = parsed.path.rstrip("/")
+    if path.endswith("/realtime"):
+        base_path = path[: -len("/realtime")]
+    else:
+        base_path = path
+
+    connect_query = {
+        key: value
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != "model"
+    }
+    http_scheme = "https" if scheme in {"wss", "https"} else "http"
+    websocket_scheme = "wss" if scheme in {"wss", "https"} else "ws"
+    base_url = urlunsplit((http_scheme, parsed.netloc, base_path, "", ""))
+    websocket_base_url = urlunsplit((websocket_scheme, parsed.netloc, base_path, "", ""))
+    client = AsyncOpenAI(
+        api_key=api_key or "DUMMY",
+        base_url=base_url,
+        websocket_base_url=websocket_base_url,
+    )
+    return client, connect_query
 
 
 class OpenaiRealtimeHandler(AsyncStreamHandler):
@@ -1084,9 +1122,23 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                 resolved_api_key = "DUMMY"
             return AsyncOpenAI(api_key=resolved_api_key)
 
-        session_url = getattr(config, "S2S_REALTIME_SESSION_URL", None)
+        direct_realtime_url = get_s2s_direct_ws_url()
+        if direct_realtime_url:
+            if get_s2s_session_url():
+                logger.info("S2S_REALTIME_WS_URL is set; bypassing S2S_REALTIME_SESSION_URL and using direct realtime.")
+            client, connect_query = _build_openai_compatible_client_from_realtime_url(
+                direct_realtime_url,
+                resolved_api_key,
+            )
+            self._realtime_connect_query = connect_query
+            logger.info("Using direct speech-to-speech realtime endpoint %s", direct_realtime_url)
+            return client
+
+        session_url = get_s2s_session_url()
         if not session_url:
-            raise RuntimeError(f"S2S_REALTIME_SESSION_URL must be set when BACKEND_PROVIDER={S2S_BACKEND}")
+            raise RuntimeError(
+                f"Either S2S_REALTIME_SESSION_URL or S2S_REALTIME_WS_URL must be set when BACKEND_PROVIDER={S2S_BACKEND}"
+            )
 
         async with httpx.AsyncClient(timeout=10.0) as http_client:
             response = await http_client.post(session_url)
@@ -1102,14 +1154,13 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         if not path.endswith("/realtime"):
             raise ValueError(f"Expected realtime connect URL ending with /realtime, got: {connect_url}")
 
-        base_path = path[: -len("/realtime")]
         logger.info("Allocated realtime session %s", payload.get("session_id") or "<unknown>")
-        self._realtime_connect_query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-        return AsyncOpenAI(
-            api_key=resolved_api_key or "DUMMY",
-            base_url=urlunsplit(("https" if parsed.scheme == "wss" else "http", parsed.netloc, base_path, "", "")),
-            websocket_base_url=urlunsplit((parsed.scheme, parsed.netloc, base_path, "", "")),
+        client, connect_query = _build_openai_compatible_client_from_realtime_url(
+            connect_url,
+            resolved_api_key,
         )
+        self._realtime_connect_query = connect_query
+        return client
 
     async def send_idle_signal(self, idle_duration: float) -> None:
         """Send an idle signal to the openai server."""

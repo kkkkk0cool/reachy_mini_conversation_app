@@ -53,6 +53,7 @@ def run(
         config,
         is_gemini_model,
         get_backend_label,
+        get_s2s_connection_mode,
         refresh_runtime_config_from_env,
     )
     from reachy_mini_conversation_app.startup_settings import (
@@ -182,9 +183,14 @@ def run(
     else:
         from reachy_mini_conversation_app.openai_realtime import OpenaiRealtimeHandler
 
-        transport_label = (
-            "speech-to-speech session allocator" if config.BACKEND_PROVIDER == S2S_BACKEND else "OpenAI Realtime API"
-        )
+        if config.BACKEND_PROVIDER == S2S_BACKEND:
+            transport_label = (
+                "speech-to-speech direct websocket"
+                if get_s2s_connection_mode() == "direct"
+                else "speech-to-speech session allocator"
+            )
+        else:
+            transport_label = "OpenAI Realtime API"
         logger.info(
             "Using %s via OpenAI-compatible realtime handler (%s)",
             get_backend_label(config.BACKEND_PROVIDER),

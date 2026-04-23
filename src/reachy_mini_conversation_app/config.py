@@ -243,14 +243,17 @@ class Config:
     )
     MODEL_NAME = _resolve_model_name(BACKEND_PROVIDER, os.getenv("MODEL_NAME"))
     S2S_REALTIME_SESSION_URL = os.getenv("S2S_REALTIME_SESSION_URL")
+    S2S_REALTIME_WS_URL = os.getenv("S2S_REALTIME_WS_URL")
     HF_HOME = os.getenv("HF_HOME", "./cache")
     LOCAL_VISION_MODEL = os.getenv("LOCAL_VISION_MODEL", "HuggingFaceTB/SmolVLM2-2.2B-Instruct")
     HF_TOKEN = os.getenv("HF_TOKEN")  # Optional, falls back to hf auth login if not set
 
     logger.debug(
-        "Backend provider: %s, Model: %s, HF_HOME: %s, Vision Model: %s",
+        "Backend provider: %s, Model: %s, S2S session URL set: %s, S2S direct URL set: %s, HF_HOME: %s, Vision Model: %s",
         BACKEND_PROVIDER,
         MODEL_NAME,
+        bool(S2S_REALTIME_SESSION_URL and S2S_REALTIME_SESSION_URL.strip()),
+        bool(S2S_REALTIME_WS_URL and S2S_REALTIME_WS_URL.strip()),
         HF_HOME,
         LOCAL_VISION_MODEL,
     )
@@ -338,6 +341,7 @@ def refresh_runtime_config_from_env() -> None:
     )
     config.MODEL_NAME = _resolve_model_name(config.BACKEND_PROVIDER, os.getenv("MODEL_NAME"))
     config.S2S_REALTIME_SESSION_URL = os.getenv("S2S_REALTIME_SESSION_URL")
+    config.S2S_REALTIME_WS_URL = os.getenv("S2S_REALTIME_WS_URL")
     config.REACHY_MINI_CUSTOM_PROFILE = LOCKED_PROFILE or os.getenv("REACHY_MINI_CUSTOM_PROFILE")
 
 
@@ -373,6 +377,32 @@ def get_default_voice_for_backend(backend: str | None = None) -> str:
     """Return the default voice for a backend selector value."""
     normalized_backend = get_backend_choice() if backend is None else _normalize_backend_provider(backend)
     return DEFAULT_VOICE_BY_BACKEND[normalized_backend]
+
+
+def get_s2s_session_url() -> str | None:
+    """Return the configured speech-to-speech session allocator URL, if any."""
+    value = (getattr(config, "S2S_REALTIME_SESSION_URL", None) or "").strip()
+    return value or None
+
+
+def get_s2s_direct_ws_url() -> str | None:
+    """Return the configured direct speech-to-speech realtime URL, if any."""
+    value = (getattr(config, "S2S_REALTIME_WS_URL", None) or "").strip()
+    return value or None
+
+
+def get_s2s_connection_mode() -> str | None:
+    """Return the configured speech-to-speech connection mode."""
+    if get_s2s_direct_ws_url():
+        return "direct"
+    if get_s2s_session_url():
+        return "allocator"
+    return None
+
+
+def has_s2s_realtime_target() -> bool:
+    """Return whether speech-to-speech has either a direct or allocator target."""
+    return get_s2s_connection_mode() is not None
 
 
 def is_gemini_model() -> bool:

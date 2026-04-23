@@ -17,6 +17,7 @@ import asyncio
 import logging
 from typing import List, Optional
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastrtc import AdditionalOutputs, audio_to_float32
 from scipy.signal import resample
@@ -30,6 +31,10 @@ from reachy_mini_conversation_app.config import (
     OPENAI_BACKEND,
     config,
     get_backend_choice,
+    get_s2s_session_url,
+    get_s2s_direct_ws_url,
+    get_s2s_connection_mode,
+    has_s2s_realtime_target,
     get_model_name_for_backend,
     refresh_runtime_config_from_env,
 )
@@ -65,6 +70,18 @@ LEGACY_STARTUP_ENV_NAMES = (
     "REACHY_MINI_VOICE_OVERRIDE",
 )
 
+_LOCAL_PLAYER_BACKENDS = tuple(
+    backend
+    for backend in (
+        getattr(MediaBackend, "LOCAL", None),
+        getattr(MediaBackend, "GSTREAMER", None),
+        getattr(MediaBackend, "GSTREAMER_NO_VIDEO", None),
+        getattr(MediaBackend, "DEFAULT", None),
+        getattr(MediaBackend, "DEFAULT_NO_VIDEO", None),
+    )
+    if backend is not None
+)
+
 
 def _estimate_pending_playback_seconds(robot: ReachyMini) -> float:
     """Best-effort estimate of audio still queued in the local player."""
@@ -84,6 +101,29 @@ def _estimate_pending_playback_seconds(robot: ReachyMini) -> float:
         return 0.0
 
     return max(0.0, pending_ns / 1e9)
+
+
+def _uses_local_player_backend(backend: object) -> bool:
+    """Return whether the media backend uses a local player implementation."""
+    return backend in _LOCAL_PLAYER_BACKENDS
+
+
+def _parse_direct_s2s_target(ws_url: str | None) -> tuple[str | None, int | None]:
+    """Extract host and port from a direct speech-to-speech websocket URL."""
+    if not ws_url:
+        return None, None
+    try:
+        parsed = urlsplit(ws_url)
+        host = parsed.hostname
+        port = parsed.port or 8765
+        return host, port
+    except Exception:
+        return None, None
+
+
+def _build_direct_s2s_ws_url(host: str, port: int) -> str:
+    """Build the direct speech-to-speech websocket URL used by the app."""
+    return f"ws://{host}:{port}/v1/realtime"
 
 
 class LocalStream:
@@ -163,7 +203,7 @@ class LocalStream:
         if backend == GEMINI_BACKEND:
             return self._has_key(config.GEMINI_API_KEY)
         if backend == S2S_BACKEND:
-            return self._has_key(getattr(config, "S2S_REALTIME_SESSION_URL", None))
+            return has_s2s_realtime_target()
         return self._has_key(config.OPENAI_API_KEY)
 
     @staticmethod
@@ -172,7 +212,7 @@ class LocalStream:
         if backend == GEMINI_BACKEND:
             return "GEMINI_API_KEY"
         if backend == S2S_BACKEND:
-            return "S2S_REALTIME_SESSION_URL"
+            return "S2S_REALTIME_SESSION_URL or S2S_REALTIME_WS_URL"
         return "OPENAI_API_KEY"
 
     def _persist_env_value(self, env_name: str, value: str) -> None:
@@ -250,6 +290,25 @@ class LocalStream:
         except Exception as e:
             logger.warning("Failed to remove %s: %s", ", ".join(normalized_names), e)
 
+    def _clear_env_values(self, env_names: tuple[str, ...]) -> None:
+        """Clear environment values both in-memory and in the instance `.env`."""
+        normalized_names = tuple(sorted({name.strip() for name in env_names if name and name.strip()}))
+        if not normalized_names:
+            return
+
+        for env_name in normalized_names:
+            try:
+                os.environ.pop(env_name, None)
+            except Exception:
+                pass
+
+        self._remove_persisted_env_values(normalized_names)
+        refresh_runtime_config_from_env()
+
+    def _persist_s2s_direct_connection(self, host: str, port: int) -> None:
+        """Persist a direct speech-to-speech websocket target."""
+        self._persist_env_value("S2S_REALTIME_WS_URL", _build_direct_s2s_ws_url(host, port))
+
     def _persist_api_key(self, key: str) -> None:
         """Persist OPENAI_API_KEY to environment and instance `.env`."""
         self._persist_env_value("OPENAI_API_KEY", key)
@@ -326,16 +385,25 @@ class LocalStream:
         class BackendPayload(BaseModel):
             backend: str
             api_key: Optional[str] = None
+            s2s_mode: Optional[str] = None
+            s2s_host: Optional[str] = None
+            s2s_port: Optional[int] = None
 
         def _status_payload() -> dict[str, object]:
             backend_provider = get_backend_choice()
             active_backend = self._active_backend()
             has_openai_key = self._has_required_key(OPENAI_BACKEND)
             has_gemini_key = self._has_required_key(GEMINI_BACKEND)
-            has_s2s_session_url = self._has_required_key(S2S_BACKEND)
+            s2s_session_url = get_s2s_session_url()
+            s2s_ws_url = get_s2s_direct_ws_url()
+            s2s_direct_host, s2s_direct_port = _parse_direct_s2s_target(s2s_ws_url)
+            has_s2s_session_url = bool(s2s_session_url)
+            has_s2s_ws_url = bool(s2s_ws_url)
+            has_s2s_connection = has_s2s_session_url or has_s2s_ws_url
+            s2s_connection_mode = get_s2s_connection_mode()
             can_proceed_with_openai = has_openai_key
             can_proceed_with_gemini = has_gemini_key
-            can_proceed_with_s2s = has_s2s_session_url
+            can_proceed_with_s2s = has_s2s_connection
             can_proceed = self._has_required_key(active_backend)
             requires_restart = backend_provider != active_backend
             return {
@@ -345,6 +413,11 @@ class LocalStream:
                 "has_openai_key": has_openai_key,
                 "has_gemini_key": has_gemini_key,
                 "has_s2s_session_url": has_s2s_session_url,
+                "has_s2s_ws_url": has_s2s_ws_url,
+                "has_s2s_connection": has_s2s_connection,
+                "s2s_connection_mode": s2s_connection_mode,
+                "s2s_direct_host": s2s_direct_host,
+                "s2s_direct_port": s2s_direct_port,
                 "can_proceed": can_proceed,
                 "can_proceed_with_openai": can_proceed_with_openai,
                 "can_proceed_with_gemini": can_proceed_with_gemini,
@@ -400,6 +473,26 @@ class LocalStream:
                 self._persist_api_key(api_key)
             if backend == GEMINI_BACKEND and api_key:
                 self._persist_gemini_api_key(api_key)
+            if backend == S2S_BACKEND:
+                s2s_mode = (payload.s2s_mode or get_s2s_connection_mode() or "direct").strip().lower()
+                if s2s_mode == "direct":
+                    host = (payload.s2s_host or "").strip()
+                    if not host:
+                        return JSONResponse({"ok": False, "error": "empty_s2s_host"}, status_code=400)
+                    if "://" in host or "/" in host or "?" in host or "#" in host:
+                        return JSONResponse({"ok": False, "error": "invalid_s2s_host"}, status_code=400)
+
+                    port = payload.s2s_port or 8765
+                    if port < 1 or port > 65535:
+                        return JSONResponse({"ok": False, "error": "invalid_s2s_port"}, status_code=400)
+
+                    self._persist_s2s_direct_connection(host, port)
+                elif s2s_mode == "allocator":
+                    self._clear_env_values(("S2S_REALTIME_WS_URL",))
+                    if not bool(get_s2s_session_url()):
+                        return JSONResponse({"ok": False, "error": "missing_s2s_session_url"}, status_code=400)
+                else:
+                    return JSONResponse({"ok": False, "error": "invalid_s2s_mode"}, status_code=400)
 
             self._persist_backend_choice(backend)
             payload_data = _status_payload()
@@ -557,7 +650,7 @@ class LocalStream:
         backend = getattr(self._robot.media, "backend", None)
         audio = getattr(self._robot.media, "audio", None)
         if audio is not None:
-            if backend == MediaBackend.LOCAL and hasattr(audio, "clear_player") and callable(audio.clear_player):
+            if _uses_local_player_backend(backend) and hasattr(audio, "clear_player") and callable(audio.clear_player):
                 audio.clear_player()
             elif (
                 backend == MediaBackend.WEBRTC

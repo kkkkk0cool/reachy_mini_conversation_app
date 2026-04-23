@@ -24,6 +24,13 @@ from reachy_mini_conversation_app.startup_settings import (
 from reachy_mini_conversation_app.headless_personality_ui import mount_personality_routes
 
 
+LOCAL_PLAYER_BACKEND = (
+    getattr(MediaBackend, "LOCAL", None)
+    or getattr(MediaBackend, "GSTREAMER", None)
+    or getattr(MediaBackend, "DEFAULT", None)
+)
+
+
 def test_clear_audio_queue_prefers_clear_player_when_available() -> None:
     """Local GStreamer audio should use the lower-level player flush when available."""
     handler = MagicMock()
@@ -31,7 +38,7 @@ def test_clear_audio_queue_prefers_clear_player_when_available() -> None:
         clear_player=MagicMock(),
         clear_output_buffer=MagicMock(),
     )
-    robot = SimpleNamespace(media=SimpleNamespace(audio=audio, backend=MediaBackend.LOCAL))
+    robot = SimpleNamespace(media=SimpleNamespace(audio=audio, backend=LOCAL_PLAYER_BACKEND))
     stream = LocalStream(handler, robot)
 
     stream.clear_audio_queue()
@@ -98,7 +105,7 @@ async def test_play_loop_feeds_head_wobbler_with_local_playback_delay() -> None:
     )
     media = SimpleNamespace(
         audio=audio,
-        backend=MediaBackend.LOCAL,
+        backend=LOCAL_PLAYER_BACKEND,
         get_output_audio_samplerate=lambda: 24000,
         push_audio_sample=MagicMock(),
     )
@@ -217,6 +224,128 @@ def test_backend_config_preserves_explicit_model_override_when_saving_key(
     assert f"MODEL_NAME={custom_model}" in env_text
     assert "MODEL_NAME=gpt-realtime" not in env_text
     assert "OPENAI_API_KEY=openai-test-key" in env_text
+
+
+def test_backend_config_persists_direct_s2s_selection_and_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settings API should persist a direct speech-to-speech websocket target."""
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "openai")
+    monkeypatch.setattr(config, "MODEL_NAME", "gpt-realtime")
+    monkeypatch.setattr(config, "S2S_REALTIME_SESSION_URL", None)
+    monkeypatch.setattr(config, "S2S_REALTIME_WS_URL", None)
+    monkeypatch.setenv("BACKEND_PROVIDER", "openai")
+    monkeypatch.setenv("MODEL_NAME", "gpt-realtime")
+    monkeypatch.delenv("S2S_REALTIME_SESSION_URL", raising=False)
+    monkeypatch.delenv("S2S_REALTIME_WS_URL", raising=False)
+
+    app = FastAPI()
+    robot = SimpleNamespace(media=SimpleNamespace(audio=None, backend=None))
+    stream = LocalStream(MagicMock(), robot, settings_app=app, instance_path=str(tmp_path))
+    stream._init_settings_ui_if_needed()
+
+    client = TestClient(app)
+    response = client.post(
+        "/backend_config",
+        json={
+            "backend": "speech-to-speech",
+            "s2s_mode": "direct",
+            "s2s_host": "localhost",
+            "s2s_port": 8765,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["backend_provider"] == "speech-to-speech"
+    assert data["active_backend"] == "openai"
+    assert data["has_s2s_ws_url"] is True
+    assert data["has_s2s_connection"] is True
+    assert data["s2s_connection_mode"] == "direct"
+    assert data["s2s_direct_host"] == "localhost"
+    assert data["s2s_direct_port"] == 8765
+    assert data["requires_restart"] is True
+
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "BACKEND_PROVIDER=speech-to-speech" in env_text
+    assert "S2S_REALTIME_WS_URL=ws://localhost:8765/v1/realtime" in env_text
+
+
+def test_backend_config_allocator_clears_direct_s2s_ws_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saving the deployed speech-to-speech mode should clear any direct websocket override."""
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "BACKEND_PROVIDER=speech-to-speech\n"
+        "S2S_REALTIME_SESSION_URL=https://lb.example.test/session\n"
+        "S2S_REALTIME_WS_URL=ws://localhost:8765/v1/realtime\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "speech-to-speech")
+    monkeypatch.setattr(config, "MODEL_NAME", "gpt-realtime")
+    monkeypatch.setattr(config, "S2S_REALTIME_SESSION_URL", "https://lb.example.test/session")
+    monkeypatch.setattr(config, "S2S_REALTIME_WS_URL", "ws://localhost:8765/v1/realtime")
+    monkeypatch.setenv("BACKEND_PROVIDER", "speech-to-speech")
+    monkeypatch.setenv("MODEL_NAME", "gpt-realtime")
+    monkeypatch.setenv("S2S_REALTIME_SESSION_URL", "https://lb.example.test/session")
+    monkeypatch.setenv("S2S_REALTIME_WS_URL", "ws://localhost:8765/v1/realtime")
+
+    app = FastAPI()
+    robot = SimpleNamespace(media=SimpleNamespace(audio=None, backend=None))
+    stream = LocalStream(MagicMock(), robot, settings_app=app, instance_path=str(tmp_path))
+    stream._init_settings_ui_if_needed()
+
+    client = TestClient(app)
+    response = client.post(
+        "/backend_config",
+        json={
+            "backend": "speech-to-speech",
+            "s2s_mode": "allocator",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["has_s2s_session_url"] is True
+    assert data["has_s2s_ws_url"] is False
+    assert data["s2s_connection_mode"] == "allocator"
+
+    env_text = env_path.read_text(encoding="utf-8")
+    assert "S2S_REALTIME_SESSION_URL=https://lb.example.test/session" in env_text
+    assert "S2S_REALTIME_WS_URL=" not in env_text
+
+
+def test_status_reports_direct_s2s_ws_url_as_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settings API should treat a direct speech-to-speech websocket as a valid configuration."""
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "speech-to-speech")
+    monkeypatch.setattr(config, "S2S_REALTIME_SESSION_URL", None)
+    monkeypatch.setattr(config, "S2S_REALTIME_WS_URL", "ws://127.0.0.1:8765/v1/realtime")
+
+    app = FastAPI()
+    robot = SimpleNamespace(media=SimpleNamespace(audio=None, backend=None))
+    stream = LocalStream(MagicMock(), robot, settings_app=app, instance_path=str(tmp_path))
+    stream._init_settings_ui_if_needed()
+
+    client = TestClient(app)
+    response = client.get("/status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["backend_provider"] == "speech-to-speech"
+    assert data["has_s2s_session_url"] is False
+    assert data["has_s2s_ws_url"] is True
+    assert data["has_s2s_connection"] is True
+    assert data["s2s_connection_mode"] == "direct"
+    assert data["can_proceed_with_s2s"] is True
 
 
 def test_headless_personality_routes_return_gemini_voices_when_backend_selected(

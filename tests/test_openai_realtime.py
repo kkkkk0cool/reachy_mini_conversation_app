@@ -985,6 +985,39 @@ async def test_run_realtime_session_passes_allocated_session_query(monkeypatch: 
 
 
 @pytest.mark.asyncio
+async def test_build_realtime_client_uses_direct_s2s_ws_url(monkeypatch: Any) -> None:
+    """Speech-to-speech direct websocket mode should bypass the session allocator."""
+    captured_client_kwargs: dict[str, Any] = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            captured_client_kwargs.update(kwargs)
+
+    def _unexpected_async_client(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("session allocator should not be called in direct websocket mode")
+
+    monkeypatch.setattr(rt_mod, "AsyncOpenAI", FakeClient)
+    monkeypatch.setattr(rt_mod.httpx, "AsyncClient", _unexpected_async_client)
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "speech-to-speech")
+    monkeypatch.setattr(config, "S2S_REALTIME_SESSION_URL", "https://lb.example.test/session")
+    monkeypatch.setattr(
+        config,
+        "S2S_REALTIME_WS_URL",
+        "ws://127.0.0.1:8765/v1/realtime?session_token=abc123&model=ignored-by-sdk",
+    )
+
+    handler = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+
+    client = await handler._build_realtime_client()
+
+    assert client is not None
+    assert captured_client_kwargs["api_key"] == "DUMMY"
+    assert captured_client_kwargs["base_url"] == "http://127.0.0.1:8765/v1"
+    assert captured_client_kwargs["websocket_base_url"] == "ws://127.0.0.1:8765/v1"
+    assert handler._realtime_connect_query == {"session_token": "abc123"}
+
+
+@pytest.mark.asyncio
 async def test_handler_uses_openai_sample_rate_for_openai_backend(monkeypatch: Any) -> None:
     """OpenAI backend should keep the 24 kHz realtime audio configuration."""
     monkeypatch.setattr(config, "BACKEND_PROVIDER", "openai")

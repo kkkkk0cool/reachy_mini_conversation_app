@@ -350,6 +350,20 @@ button.ghost:hover { border-color: rgba(94, 240, 193, 0.4); }
 .status.ok { color: var(--ok); }
 .status.warn { color: var(--warn); }
 .status.error { color: var(--error); }
+.s2s-help {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.s2s-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+.s2s-field {
+  min-width: 0;
+}
 
 /* Personality layout */
 .row {
@@ -439,6 +453,7 @@ button.ghost:hover { border-color: rgba(94, 240, 193, 0.4); }
   .hero h1 { font-size: 26px; }
   .privacy-notice { padding: 10px 12px; }
   .backend-choice-grid { grid-template-columns: 1fr; }
+  .s2s-config-grid { grid-template-columns: 1fr; }
   .row { grid-template-columns: 1fr; }
   #personality-panel .row:first-of-type { grid-template-columns: 1fr; }
   button { width: 100%; justify-content: center; }

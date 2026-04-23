@@ -2,6 +2,8 @@ const OPENAI_BACKEND = "openai";
 const GEMINI_BACKEND = "gemini";
 const S2S_BACKEND = "speech-to-speech";
 const DEFAULT_BACKEND = S2S_BACKEND;
+const S2S_DEFAULT_HOST = "localhost";
+const S2S_DEFAULT_PORT = 8765;
 const BACKEND_META = {
   [OPENAI_BACKEND]: {
     label: "OpenAI Realtime",
@@ -31,23 +33,22 @@ const BACKEND_META = {
   },
   [S2S_BACKEND]: {
     label: "Speech-to-speech",
-    formTitle: "Speech-to-speech",
+    formTitle: "Configure speech-to-speech",
     inputLabel: "",
     placeholder: "",
-    saveButton: "",
-    changeButton: "",
+    saveButton: "Save connection",
+    changeButton: "Edit connection",
     readyTitle: "Speech-to-speech ready",
-    readyCopy: "The deployed speech-to-speech backend is configured. You can jump straight to personalities.",
-    formCopy: "",
-    requiredCredentialsCopy: "Speech-to-speech requires S2S_REALTIME_SESSION_URL in the app environment.",
-    note: "Speech-to-speech uses the configured session allocator URL and does not require your own API key.",
-    requiresCredentials: false,
+    readyCopy: "Speech-to-speech is configured. You can jump straight to personalities.",
+    formCopy: "Choose whether Reachy should use the deployed speech-to-speech backend or connect directly to a local or LAN websocket endpoint.",
+    requiredCredentialsCopy: "Set up the speech-to-speech connection details before switching.",
+    note: "Speech-to-speech can use a deployed session allocator or a direct realtime websocket on localhost or your LAN.",
   },
 };
 
 function backendHasCredentials(status, backend) {
   if (backend === GEMINI_BACKEND) return !!status.has_gemini_key;
-  if (backend === S2S_BACKEND) return !!status.has_s2s_session_url;
+  if (backend === S2S_BACKEND) return !!(status.has_s2s_connection ?? (status.has_s2s_session_url || status.has_s2s_ws_url));
   return !!status.has_openai_key;
 }
 
@@ -74,7 +75,8 @@ function backendMeta(backend) {
 function formatBackendNote(text) {
   return text
     .replace("GEMINI_API_KEY", "<code>GEMINI_API_KEY</code>")
-    .replace("S2S_REALTIME_SESSION_URL", "<code>S2S_REALTIME_SESSION_URL</code>");
+    .replace("S2S_REALTIME_SESSION_URL", "<code>S2S_REALTIME_SESSION_URL</code>")
+    .replace("S2S_REALTIME_WS_URL", "<code>S2S_REALTIME_WS_URL</code>");
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -138,8 +140,13 @@ async function validateKey(key) {
   return data;
 }
 
-async function saveBackendConfig(backend, key = "") {
+async function saveBackendConfig(backend, { key = "", s2sMode = "", s2sHost = "", s2sPort = null } = {}) {
   const body = { backend, api_key: key };
+  if (backend === S2S_BACKEND) {
+    if (s2sMode) body.s2s_mode = s2sMode;
+    if (s2sHost) body.s2s_host = s2sHost;
+    if (s2sPort !== null && s2sPort !== undefined) body.s2s_port = s2sPort;
+  }
   const resp = await fetch("/backend_config", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -271,6 +278,22 @@ function setStatusMessage(el, text, tone = "") {
   el.setAttribute("aria-atomic", "true");
 }
 
+function describeS2SConfiguration(status) {
+  if (status.s2s_connection_mode === "direct") {
+    const host = status.s2s_direct_host || S2S_DEFAULT_HOST;
+    const port = status.s2s_direct_port || S2S_DEFAULT_PORT;
+    return `Speech-to-speech will connect directly to ${host}:${port}.`;
+  }
+  if (status.has_s2s_session_url) {
+    return "Speech-to-speech will use the deployed session allocator saved in the app environment.";
+  }
+  return "Choose a deployed allocator or a local/LAN websocket endpoint.";
+}
+
+function isLocalS2SHost(host) {
+  return !host || host === "localhost" || host === "127.0.0.1";
+}
+
 async function init() {
   const loading = document.getElementById("loading");
   show(loading, true);
@@ -288,10 +311,20 @@ async function init() {
   const personalityPanel = document.getElementById("personality-panel");
   const formTitle = document.getElementById("form-title");
   const formCopy = document.getElementById("form-copy");
+  const apiKeyFields = document.getElementById("api-key-fields");
   const apiKeyLabel = document.getElementById("api-key-label");
   const saveBtn = document.getElementById("save-btn");
   const changeKeyBtn = document.getElementById("change-key-btn");
   const input = document.getElementById("api-key");
+  const s2sFields = document.getElementById("s2s-fields");
+  const s2sMode = document.getElementById("s2s-mode");
+  const s2sModeCopy = document.getElementById("s2s-mode-copy");
+  const s2sDirectFields = document.getElementById("s2s-direct-fields");
+  const s2sHostPreset = document.getElementById("s2s-host-preset");
+  const s2sHostCustomWrap = document.getElementById("s2s-host-custom-wrap");
+  const s2sHostCustom = document.getElementById("s2s-host-custom");
+  const s2sPort = document.getElementById("s2s-port");
+  const s2sPreview = document.getElementById("s2s-preview");
 
   // Personality elements
   const pSelect = document.getElementById("personality-select");
@@ -315,6 +348,47 @@ async function init() {
   let selectedBackend = DEFAULT_BACKEND;
   let editingCredentials = false;
 
+  function resolveS2SHost() {
+    return s2sHostPreset.value === "custom" ? s2sHostCustom.value.trim() : S2S_DEFAULT_HOST;
+  }
+
+  function updateS2SControls() {
+    const directMode = s2sMode.value !== "allocator";
+    const customHost = s2sHostPreset.value === "custom";
+    show(s2sDirectFields, directMode);
+    show(s2sHostCustomWrap, directMode && customHost);
+    s2sModeCopy.textContent = directMode
+      ? "Use localhost when the speech-to-speech server runs on the same machine, or switch to a custom LAN IP or hostname."
+      : "Use the deployed session allocator already saved as S2S_REALTIME_SESSION_URL.";
+
+    if (!directMode) {
+      setStatusMessage(s2sPreview, "Speech-to-speech will use the configured deployed allocator.");
+      return;
+    }
+
+    const host = resolveS2SHost() || "<host>";
+    const port = (s2sPort.value || String(S2S_DEFAULT_PORT)).trim();
+    setStatusMessage(s2sPreview, `Will save ws://${host}:${port}/v1/realtime`);
+  }
+
+  function populateS2SFields(status) {
+    const mode = status.s2s_connection_mode
+      || (status.has_s2s_session_url ? "allocator" : "direct");
+    const existingHost = status.s2s_direct_host || S2S_DEFAULT_HOST;
+    const existingPort = status.s2s_direct_port || S2S_DEFAULT_PORT;
+
+    s2sMode.value = mode;
+    if (isLocalS2SHost(existingHost)) {
+      s2sHostPreset.value = "localhost";
+      s2sHostCustom.value = "";
+    } else {
+      s2sHostPreset.value = "custom";
+      s2sHostCustom.value = existingHost;
+    }
+    s2sPort.value = String(existingPort);
+    updateS2SControls();
+  }
+
   function setSelectedBackend(backend) {
     selectedBackend = [OPENAI_BACKEND, GEMINI_BACKEND, S2S_BACKEND].includes(backend)
       ? backend
@@ -335,26 +409,35 @@ async function init() {
     const canProceedWithSelectedBackend = backendCanProceed(status, selectedBackend);
     const selectedMatchesPersisted = selectedBackend === persistedBackend;
     const selectedMatchesActive = selectedBackend === activeBackend;
-    const requiresCredentials = meta.requiresCredentials !== false;
+    const usesApiKeyForm = selectedBackend === OPENAI_BACKEND || selectedBackend === GEMINI_BACKEND;
+    const usesS2SForm = selectedBackend === S2S_BACKEND;
+    const supportsForm = usesApiKeyForm || usesS2SForm;
 
     backendChip.textContent = selectedBackend === persistedBackend ? "Saved" : "Selected";
     backendNote.innerHTML = formatBackendNote(meta.note);
 
     configuredTitle.textContent = meta.readyTitle;
-    configuredCopy.textContent = meta.readyCopy;
+    configuredCopy.textContent = usesS2SForm ? describeS2SConfiguration(status) : meta.readyCopy;
     formTitle.textContent = meta.formTitle;
-    formCopy.textContent = canProceedWithSelectedBackend ? meta.formCopy : meta.requiredCredentialsCopy;
+    formCopy.textContent = usesS2SForm
+      ? meta.formCopy
+      : canProceedWithSelectedBackend
+        ? meta.formCopy
+        : meta.requiredCredentialsCopy;
     apiKeyLabel.textContent = meta.inputLabel;
     input.placeholder = meta.placeholder;
     saveBtn.textContent = meta.saveButton;
     changeKeyBtn.textContent = meta.changeButton;
 
-    show(configuredPanel, canProceedWithSelectedBackend && (!requiresCredentials || !editingCredentials));
-    show(formPanel, requiresCredentials && (editingCredentials || !canProceedWithSelectedBackend));
-    show(changeKeyBtn, requiresCredentials && canProceedWithSelectedBackend && !editingCredentials);
+    show(configuredPanel, canProceedWithSelectedBackend && !editingCredentials);
+    show(formPanel, supportsForm && (editingCredentials || !canProceedWithSelectedBackend));
+    show(apiKeyFields, usesApiKeyForm);
+    show(s2sFields, usesS2SForm);
+    if (usesS2SForm) updateS2SControls();
+    show(changeKeyBtn, supportsForm && canProceedWithSelectedBackend && !editingCredentials);
     show(
       backendSaveBtn,
-      canProceedWithSelectedBackend && !selectedMatchesPersisted,
+      canProceedWithSelectedBackend && !selectedMatchesPersisted && !editingCredentials,
     );
     backendSaveBtn.textContent = `Use ${meta.label}`;
 
@@ -391,12 +474,18 @@ async function init() {
     has_openai_key: false,
     has_gemini_key: false,
     has_s2s_session_url: false,
+    has_s2s_ws_url: false,
+    has_s2s_connection: false,
+    s2s_connection_mode: "direct",
+    s2s_direct_host: S2S_DEFAULT_HOST,
+    s2s_direct_port: S2S_DEFAULT_PORT,
     can_proceed: false,
     can_proceed_with_openai: false,
     can_proceed_with_gemini: false,
     can_proceed_with_s2s: false,
     requires_restart: false,
   };
+  populateS2SFields(st);
   setSelectedBackend(st.backend_provider || DEFAULT_BACKEND);
   statusEl.textContent = "";
   renderCredentialPanels(st);
@@ -412,6 +501,23 @@ async function init() {
   // Remove error styling when user starts typing
   input.addEventListener("input", () => {
     input.classList.remove("error");
+  });
+  s2sHostCustom.addEventListener("input", () => {
+    s2sHostCustom.classList.remove("error");
+    updateS2SControls();
+  });
+  s2sPort.addEventListener("input", () => {
+    s2sPort.classList.remove("error");
+    updateS2SControls();
+  });
+  s2sMode.addEventListener("change", () => {
+    s2sHostCustom.classList.remove("error");
+    s2sPort.classList.remove("error");
+    updateS2SControls();
+  });
+  s2sHostPreset.addEventListener("change", () => {
+    s2sHostCustom.classList.remove("error");
+    updateS2SControls();
   });
 
   backendInputs.forEach((radio) => {
@@ -435,6 +541,59 @@ async function init() {
   });
 
   saveBtn.addEventListener("click", async () => {
+    if (selectedBackend === S2S_BACKEND) {
+      const directMode = s2sMode.value !== "allocator";
+      setStatusMessage(statusEl, "Saving connection...");
+      s2sHostCustom.classList.remove("error");
+      s2sPort.classList.remove("error");
+
+      try {
+        if (directMode) {
+          const host = resolveS2SHost();
+          const port = Number.parseInt((s2sPort.value || "").trim(), 10);
+          if (!host) {
+            s2sHostCustom.classList.add("error");
+            setStatusMessage(statusEl, "Enter a valid host or IP address.", "warn");
+            return;
+          }
+          if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            s2sPort.classList.add("error");
+            setStatusMessage(statusEl, "Enter a valid port between 1 and 65535.", "warn");
+            return;
+          }
+
+          await saveBackendConfig(selectedBackend, {
+            s2sMode: "direct",
+            s2sHost: host,
+            s2sPort: port,
+          });
+        } else {
+          await saveBackendConfig(selectedBackend, {
+            s2sMode: "allocator",
+          });
+        }
+        setStatusMessage(statusEl, "Saved. Reloading…", "ok");
+        window.location.reload();
+      } catch (e) {
+        if (e.message === "missing_s2s_session_url") {
+          setStatusMessage(
+            statusEl,
+            "No deployed session allocator is saved yet. Add S2S_REALTIME_SESSION_URL in the app environment first.",
+            "error",
+          );
+        } else if (e.message === "empty_s2s_host" || e.message === "invalid_s2s_host") {
+          s2sHostCustom.classList.add("error");
+          setStatusMessage(statusEl, "Enter a valid host or IP address.", "error");
+        } else if (e.message === "invalid_s2s_port") {
+          s2sPort.classList.add("error");
+          setStatusMessage(statusEl, "Enter a valid port between 1 and 65535.", "error");
+        } else {
+          setStatusMessage(statusEl, "Failed to save the speech-to-speech connection.", "error");
+        }
+      }
+      return;
+    }
+
     const key = input.value.trim();
     if (!key) {
       setStatusMessage(statusEl, "Please enter a valid key.", "warn");
@@ -455,7 +614,7 @@ async function init() {
       } else {
         setStatusMessage(statusEl, "Saving Gemini token...", "ok");
       }
-      await saveBackendConfig(selectedBackend, key);
+      await saveBackendConfig(selectedBackend, { key });
       setStatusMessage(statusEl, "Saved. Reloading…", "ok");
       window.location.reload();
     } catch (e) {
