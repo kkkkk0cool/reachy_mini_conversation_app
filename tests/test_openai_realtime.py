@@ -1057,7 +1057,7 @@ async def test_build_realtime_client_uses_deployed_mode_even_when_direct_s2s_ws_
     monkeypatch.setattr(rt_mod, "AsyncOpenAI", FakeClient)
     monkeypatch.setattr(rt_mod.httpx, "AsyncClient", FakeAsyncClient)
     monkeypatch.setattr(config, "BACKEND_PROVIDER", "speech-to-speech")
-    monkeypatch.setattr(config, "S2S_REALTIME_CONNECTION_MODE", "allocator")
+    monkeypatch.setattr(config, "S2S_REALTIME_CONNECTION_MODE", "deployed")
     monkeypatch.setattr(config, "S2S_REALTIME_SESSION_URL", "https://lb.example.test/session")
     monkeypatch.setattr(config, "S2S_REALTIME_WS_URL", "ws://127.0.0.1:8765/v1/realtime")
 

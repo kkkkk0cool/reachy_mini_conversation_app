@@ -50,6 +50,7 @@ def run(
         S2S_BACKEND,
         GEMINI_BACKEND,
         OPENAI_BACKEND,
+        S2S_LOCAL_CONNECTION_MODE,
         config,
         is_gemini_model,
         get_backend_label,
@@ -192,7 +193,7 @@ def run(
         if config.BACKEND_PROVIDER == S2S_BACKEND:
             transport_label = (
                 "speech-to-speech direct websocket"
-                if get_s2s_connection_mode() == "direct"
+                if get_s2s_connection_mode() == S2S_LOCAL_CONNECTION_MODE
                 else "speech-to-speech session allocator"
             )
         else:

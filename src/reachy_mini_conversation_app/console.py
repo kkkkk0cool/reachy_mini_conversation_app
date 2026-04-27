@@ -29,8 +29,8 @@ from reachy_mini_conversation_app.config import (
     GEMINI_BACKEND,
     LOCKED_PROFILE,
     OPENAI_BACKEND,
-    S2S_DIRECT_CONNECTION_MODE,
-    S2S_ALLOCATOR_CONNECTION_MODE,
+    S2S_LOCAL_CONNECTION_MODE,
+    S2S_DEPLOYED_CONNECTION_MODE,
     S2S_REALTIME_CONNECTION_MODE_ENV,
     config,
     get_backend_choice,
@@ -303,14 +303,14 @@ class LocalStream:
         """Persist a direct speech-to-speech websocket target."""
         self._persist_env_values(
             {
-                S2S_REALTIME_CONNECTION_MODE_ENV: "local",
+                S2S_REALTIME_CONNECTION_MODE_ENV: S2S_LOCAL_CONNECTION_MODE,
                 "S2S_REALTIME_WS_URL": _build_direct_s2s_ws_url(host, port),
             }
         )
 
     def _persist_s2s_allocator_connection(self) -> None:
         """Persist the deployed speech-to-speech allocator mode."""
-        self._persist_env_value(S2S_REALTIME_CONNECTION_MODE_ENV, "deployed")
+        self._persist_env_value(S2S_REALTIME_CONNECTION_MODE_ENV, S2S_DEPLOYED_CONNECTION_MODE)
 
     def _persist_api_key(self, key: str) -> None:
         """Persist OPENAI_API_KEY to environment and instance `.env`."""
@@ -478,7 +478,7 @@ class LocalStream:
                 self._persist_gemini_api_key(api_key)
             if backend == S2S_BACKEND:
                 s2s_mode = (payload.s2s_mode or get_s2s_selected_connection_mode()).strip().lower()
-                if s2s_mode in {S2S_DIRECT_CONNECTION_MODE, "local"}:
+                if s2s_mode == S2S_LOCAL_CONNECTION_MODE:
                     host = (payload.s2s_host or "").strip()
                     if not host:
                         return JSONResponse({"ok": False, "error": "empty_s2s_host"}, status_code=400)
@@ -490,7 +490,7 @@ class LocalStream:
                         return JSONResponse({"ok": False, "error": "invalid_s2s_port"}, status_code=400)
 
                     self._persist_s2s_direct_connection(host, port)
-                elif s2s_mode in {S2S_ALLOCATOR_CONNECTION_MODE, "deployed"}:
+                elif s2s_mode == S2S_DEPLOYED_CONNECTION_MODE:
                     if not bool(get_s2s_session_url()):
                         return JSONResponse({"ok": False, "error": "missing_s2s_session_url"}, status_code=400)
                     self._persist_s2s_allocator_connection()

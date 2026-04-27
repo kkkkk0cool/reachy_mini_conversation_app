@@ -37,6 +37,7 @@ from reachy_mini_conversation_app.config import (
     S2S_BACKEND,
     OPENAI_BACKEND,
     AVAILABLE_VOICES,
+    S2S_LOCAL_CONNECTION_MODE,
     config,
     get_s2s_session_url,
     get_s2s_direct_ws_url,
@@ -1121,7 +1122,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
         selected_connection_mode = get_s2s_selected_connection_mode()
         direct_realtime_url = get_s2s_direct_ws_url()
-        if selected_connection_mode == "direct":
+        if selected_connection_mode == S2S_LOCAL_CONNECTION_MODE:
             if not direct_realtime_url:
                 raise RuntimeError("S2S_REALTIME_WS_URL must be set when S2S_REALTIME_CONNECTION_MODE=local")
             client, connect_query = _build_openai_compatible_client_from_realtime_url(

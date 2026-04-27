@@ -90,8 +90,8 @@ GEMINI_BACKEND = "gemini"
 S2S_BACKEND = "speech-to-speech"
 DEFAULT_BACKEND_PROVIDER = S2S_BACKEND
 S2S_REALTIME_CONNECTION_MODE_ENV = "S2S_REALTIME_CONNECTION_MODE"
-S2S_DIRECT_CONNECTION_MODE = "direct"
-S2S_ALLOCATOR_CONNECTION_MODE = "allocator"
+S2S_LOCAL_CONNECTION_MODE = "local"
+S2S_DEPLOYED_CONNECTION_MODE = "deployed"
 DEFAULT_MODEL_NAME_BY_BACKEND = {
     OPENAI_BACKEND: "gpt-realtime",
     GEMINI_BACKEND: "gemini-3.1-flash-live-preview",
@@ -171,23 +171,18 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 def _normalize_s2s_connection_mode(value: str | None) -> str | None:
     """Normalize the speech-to-speech connection mode, if explicitly configured."""
-    candidate = (value or "").strip().lower().replace("-", "_")
+    candidate = (value or "").strip().lower()
     if not candidate:
         return None
 
-    normalized = {
-        "local": S2S_DIRECT_CONNECTION_MODE,
-        "direct": S2S_DIRECT_CONNECTION_MODE,
-        "deployed": S2S_ALLOCATOR_CONNECTION_MODE,
-        "allocator": S2S_ALLOCATOR_CONNECTION_MODE,
-    }.get(candidate)
-    if normalized is None:
+    if candidate not in {S2S_LOCAL_CONNECTION_MODE, S2S_DEPLOYED_CONNECTION_MODE}:
         logger.warning(
-            "Invalid %s=%r. Expected direct/local or allocator/deployed.",
+            "Invalid %s=%r. Expected local or deployed.",
             S2S_REALTIME_CONNECTION_MODE_ENV,
             value,
         )
-    return normalized
+        return None
+    return candidate
 
 
 def _collect_profile_names(profiles_root: Path) -> set[str]:
@@ -424,29 +419,29 @@ def get_s2s_selected_connection_mode() -> str:
     if configured_mode is not None:
         return configured_mode
     if get_s2s_direct_ws_url():
-        return S2S_DIRECT_CONNECTION_MODE
+        return S2S_LOCAL_CONNECTION_MODE
     if get_s2s_session_url():
-        return S2S_ALLOCATOR_CONNECTION_MODE
-    return S2S_DIRECT_CONNECTION_MODE
+        return S2S_DEPLOYED_CONNECTION_MODE
+    return S2S_LOCAL_CONNECTION_MODE
 
 
 def get_s2s_connection_mode() -> str | None:
     """Return the selected speech-to-speech mode only when its target is configured."""
     configured_mode = _normalize_s2s_connection_mode(getattr(config, "S2S_REALTIME_CONNECTION_MODE", None))
-    if configured_mode == S2S_DIRECT_CONNECTION_MODE:
-        return S2S_DIRECT_CONNECTION_MODE if get_s2s_direct_ws_url() else None
-    if configured_mode == S2S_ALLOCATOR_CONNECTION_MODE:
-        return S2S_ALLOCATOR_CONNECTION_MODE if get_s2s_session_url() else None
+    if configured_mode == S2S_LOCAL_CONNECTION_MODE:
+        return S2S_LOCAL_CONNECTION_MODE if get_s2s_direct_ws_url() else None
+    if configured_mode == S2S_DEPLOYED_CONNECTION_MODE:
+        return S2S_DEPLOYED_CONNECTION_MODE if get_s2s_session_url() else None
 
     if get_s2s_direct_ws_url():
-        return S2S_DIRECT_CONNECTION_MODE
+        return S2S_LOCAL_CONNECTION_MODE
     if get_s2s_session_url():
-        return S2S_ALLOCATOR_CONNECTION_MODE
+        return S2S_DEPLOYED_CONNECTION_MODE
     return None
 
 
 def has_s2s_realtime_target() -> bool:
-    """Return whether speech-to-speech has either a direct or allocator target."""
+    """Return whether speech-to-speech has a target for the selected mode."""
     return get_s2s_connection_mode() is not None
 
 

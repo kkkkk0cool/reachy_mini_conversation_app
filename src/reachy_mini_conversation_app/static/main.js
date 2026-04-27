@@ -279,7 +279,7 @@ function setStatusMessage(el, text, tone = "") {
 }
 
 function describeS2SConfiguration(status) {
-  if (status.s2s_connection_mode === "direct") {
+  if (status.s2s_connection_mode === "local") {
     const host = status.s2s_direct_host || S2S_DEFAULT_HOST;
     const port = status.s2s_direct_port || S2S_DEFAULT_PORT;
     return `Speech-to-speech will connect directly to ${host}:${port}.`;
@@ -353,15 +353,15 @@ async function init() {
   }
 
   function updateS2SControls() {
-    const directMode = s2sMode.value !== "allocator";
+    const localMode = s2sMode.value !== "deployed";
     const customHost = s2sHostPreset.value === "custom";
-    show(s2sDirectFields, directMode);
-    show(s2sHostCustomWrap, directMode && customHost);
-    s2sModeCopy.textContent = directMode
+    show(s2sDirectFields, localMode);
+    show(s2sHostCustomWrap, localMode && customHost);
+    s2sModeCopy.textContent = localMode
       ? "Use localhost when the speech-to-speech server runs on the same machine, or switch to a custom LAN IP or hostname."
       : "Use the deployed session allocator already saved as S2S_REALTIME_SESSION_URL.";
 
-    if (!directMode) {
+    if (!localMode) {
       setStatusMessage(s2sPreview, "Speech-to-speech will use the configured deployed allocator.");
       return;
     }
@@ -373,7 +373,7 @@ async function init() {
 
   function populateS2SFields(status) {
     const mode = status.s2s_connection_mode
-      || (status.has_s2s_session_url ? "allocator" : "direct");
+      || (status.has_s2s_session_url ? "deployed" : "local");
     const existingHost = status.s2s_direct_host || S2S_DEFAULT_HOST;
     const existingPort = status.s2s_direct_port || S2S_DEFAULT_PORT;
 
@@ -476,7 +476,7 @@ async function init() {
     has_s2s_session_url: false,
     has_s2s_ws_url: false,
     has_s2s_connection: false,
-    s2s_connection_mode: "direct",
+    s2s_connection_mode: "local",
     s2s_direct_host: S2S_DEFAULT_HOST,
     s2s_direct_port: S2S_DEFAULT_PORT,
     can_proceed: false,
@@ -542,13 +542,13 @@ async function init() {
 
   saveBtn.addEventListener("click", async () => {
     if (selectedBackend === S2S_BACKEND) {
-      const directMode = s2sMode.value !== "allocator";
+      const localMode = s2sMode.value !== "deployed";
       setStatusMessage(statusEl, "Saving connection...");
       s2sHostCustom.classList.remove("error");
       s2sPort.classList.remove("error");
 
       try {
-        if (directMode) {
+        if (localMode) {
           const host = resolveS2SHost();
           const port = Number.parseInt((s2sPort.value || "").trim(), 10);
           if (!host) {
@@ -563,13 +563,13 @@ async function init() {
           }
 
           await saveBackendConfig(selectedBackend, {
-            s2sMode: "direct",
+            s2sMode: "local",
             s2sHost: host,
             s2sPort: port,
           });
         } else {
           await saveBackendConfig(selectedBackend, {
-            s2sMode: "allocator",
+            s2sMode: "deployed",
           });
         }
         setStatusMessage(statusEl, "Saved. Reloading…", "ok");
