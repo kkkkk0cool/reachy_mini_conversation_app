@@ -102,7 +102,6 @@ def run(
     from reachy_mini_conversation_app.console import LocalStream
     from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
     from reachy_mini_conversation_app.audio.head_wobbler import HeadWobbler
-    from reachy_mini_conversation_app.audio.startup_config import apply_audio_startup_config
 
     if args.no_camera and args.head_tracker is not None:
         logger.warning("Head tracking disabled: --no-camera flag is set. Remove --no-camera to enable head tracking.")
@@ -145,11 +144,6 @@ def run(
     if is_simulation and not args.gradio:
         logger.info("Simulation mode detected. Automatically enabling gradio flag.")
         args.gradio = True
-
-    if is_simulation:
-        logger.info("Skipping Reachy audio startup config in simulation mode.")
-    else:
-        apply_audio_startup_config(robot, logger=logger)
 
     try:
         camera_worker, vision_processor = initialize_camera_and_vision(args, robot)

@@ -44,7 +44,6 @@ from reachy_mini_conversation_app.config import (
 )
 from reachy_mini_conversation_app.openai_realtime import OpenaiRealtimeHandler
 from reachy_mini_conversation_app.startup_settings import read_startup_settings, write_startup_settings
-from reachy_mini_conversation_app.audio.startup_config import apply_audio_startup_config
 from reachy_mini_conversation_app.headless_personality_ui import mount_personality_routes
 
 
@@ -586,7 +585,6 @@ class LocalStream:
         self._robot.media.start_recording()
         self._robot.media.start_playing()
         time.sleep(1)  # give some time to the pipelines to start
-        apply_audio_startup_config(self._robot, logger=logger)
 
         async def runner() -> None:
             # Capture loop for cross-thread personality actions
