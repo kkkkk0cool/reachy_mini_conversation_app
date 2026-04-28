@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastrtc import AdditionalOutputs
 
 import reachy_mini_conversation_app.openai_realtime as rt_mod
 import reachy_mini_conversation_app.tools.background_tool_manager as btm_mod
@@ -665,8 +666,10 @@ async def test_apply_personality_preserves_manual_voice_override(monkeypatch: An
     assert session["audio"]["output"]["voice"] == "marin"
 
 
-def test_handler_uses_startup_voice_at_startup() -> None:
+def test_handler_uses_startup_voice_at_startup(monkeypatch: Any) -> None:
     """OpenAI handler startup should restore a persisted startup voice."""
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "openai")
+
     handler = OpenaiRealtimeHandler(
         ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()),
         startup_voice="shimmer",
@@ -675,8 +678,23 @@ def test_handler_uses_startup_voice_at_startup() -> None:
     assert handler.get_current_voice() == "shimmer"
 
 
-def test_copy_preserves_current_voice_override() -> None:
+def test_handler_uses_s2s_startup_voice_at_startup(monkeypatch: Any) -> None:
+    """Speech-to-speech startup should restore persisted S2S voices."""
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "speech-to-speech")
+
+    handler = OpenaiRealtimeHandler(
+        ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()),
+        startup_voice="Aiden",
+    )
+
+    assert rt_mod._normalize_startup_voice("Aiden") == "Aiden"
+    assert handler.get_current_voice() == "Aiden"
+
+
+def test_copy_preserves_current_voice_override(monkeypatch: Any) -> None:
     """Copied OpenAI handlers should keep the current voice override."""
+    monkeypatch.setattr(config, "BACKEND_PROVIDER", "openai")
+
     handler = OpenaiRealtimeHandler(
         ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()),
         startup_voice="shimmer",
@@ -1291,6 +1309,17 @@ async def test_response_sender_retries_when_active_response_error_uses_type_only
         record.levelname == "ERROR" and "Realtime error" in record.getMessage() for record in caplog.records
     )
     assert any("worker will retry after active response finishes" in record.getMessage() for record in caplog.records)
+    queued_outputs = []
+    while not handler.output_queue.empty():
+        queued_outputs.append(handler.output_queue.get_nowait())
+    queued_messages = [
+        message
+        for output in queued_outputs
+        if isinstance(output, AdditionalOutputs)
+        for message in output.args
+        if isinstance(message, dict)
+    ]
+    assert not any(str(message.get("content", "")).startswith("[error]") for message in queued_messages)
 
 
 @pytest.mark.asyncio

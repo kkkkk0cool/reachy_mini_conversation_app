@@ -114,7 +114,10 @@ def parse_args() -> ProbeArguments:
     parser.add_argument(
         "--session-url",
         default=os.getenv("S2S_REALTIME_SESSION_URL") or getattr(config, "S2S_REALTIME_SESSION_URL", None),
-        help="Session allocation URL. Defaults to S2S_REALTIME_SESSION_URL from env/config.",
+        help=(
+            "Probe-only session allocation URL. Defaults to S2S_REALTIME_SESSION_URL if set for this probe, "
+            "otherwise the app's built-in Hugging Face allocator URL."
+        ),
     )
     parser.add_argument(
         "--ws-url",
@@ -530,7 +533,7 @@ async def listen_and_play_ws(args: ProbeArguments) -> None:
     allocated_session: Optional[AllocatedSession] = None
     if not ws_url:
         if not args.session_url:
-            raise SystemExit("Set S2S_REALTIME_SESSION_URL or pass --session-url/--ws-url.")
+            raise SystemExit("Pass --session-url or --ws-url.")
         alloc_start = time.perf_counter()
         allocated_session = await allocate_session(args.session_url, args.authorization)
         alloc_ms = (time.perf_counter() - alloc_start) * 1000

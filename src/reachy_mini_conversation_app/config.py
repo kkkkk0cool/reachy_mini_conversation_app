@@ -92,6 +92,9 @@ DEFAULT_BACKEND_PROVIDER = S2S_BACKEND
 S2S_REALTIME_CONNECTION_MODE_ENV = "S2S_REALTIME_CONNECTION_MODE"
 S2S_LOCAL_CONNECTION_MODE = "local"
 S2S_DEPLOYED_CONNECTION_MODE = "deployed"
+# App-managed Hugging Face speech-to-speech server allocator. This is intentionally
+# not read from S2S_REALTIME_SESSION_URL; users who need a custom speech-to-speech
+# target should use S2S_REALTIME_CONNECTION_MODE=local with S2S_REALTIME_WS_URL.
 DEFAULT_S2S_REALTIME_SESSION_URL = "https://v8si2gztnaqwjvf2.us-east-1.aws.endpoints.huggingface.cloud/session"
 DEFAULT_MODEL_NAME_BY_BACKEND = {
     OPENAI_BACKEND: "gpt-realtime",
@@ -263,6 +266,7 @@ class Config:
     )
     MODEL_NAME = _resolve_model_name(BACKEND_PROVIDER, os.getenv("MODEL_NAME"))
     S2S_REALTIME_CONNECTION_MODE = _normalize_s2s_connection_mode(os.getenv(S2S_REALTIME_CONNECTION_MODE_ENV))
+    # Deliberately ignore S2S_REALTIME_SESSION_URL from the environment; see DEFAULT_S2S_REALTIME_SESSION_URL.
     S2S_REALTIME_SESSION_URL = DEFAULT_S2S_REALTIME_SESSION_URL
     S2S_REALTIME_WS_URL = os.getenv("S2S_REALTIME_WS_URL")
     HF_HOME = os.getenv("HF_HOME", "./cache")
@@ -363,6 +367,7 @@ def refresh_runtime_config_from_env() -> None:
     )
     config.MODEL_NAME = _resolve_model_name(config.BACKEND_PROVIDER, os.getenv("MODEL_NAME"))
     config.S2S_REALTIME_CONNECTION_MODE = _normalize_s2s_connection_mode(os.getenv(S2S_REALTIME_CONNECTION_MODE_ENV))
+    # Deliberately ignore S2S_REALTIME_SESSION_URL from the environment; see DEFAULT_S2S_REALTIME_SESSION_URL.
     config.S2S_REALTIME_SESSION_URL = DEFAULT_S2S_REALTIME_SESSION_URL
     config.S2S_REALTIME_WS_URL = os.getenv("S2S_REALTIME_WS_URL")
     config.REACHY_MINI_CUSTOM_PROFILE = LOCKED_PROFILE or os.getenv("REACHY_MINI_CUSTOM_PROFILE")

@@ -11,7 +11,6 @@ from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlsplit, parse_qsl, urlunsplit
 
-import cv2
 import httpx
 import numpy as np
 import gradio as gr
@@ -36,7 +35,6 @@ from openai.types.realtime.realtime_audio_input_turn_detection_param import Serv
 from reachy_mini_conversation_app.config import (
     S2S_BACKEND,
     OPENAI_BACKEND,
-    AVAILABLE_VOICES,
     S2S_LOCAL_CONNECTION_MODE,
     config,
     get_s2s_session_url,
@@ -92,11 +90,17 @@ def _compute_response_cost(usage: Any) -> float:
 
 
 def _normalize_startup_voice(voice: str | None) -> str | None:
-    """Return a valid persisted OpenAI startup voice or None."""
-    if voice in AVAILABLE_VOICES:
+    """Return a valid persisted startup voice for the selected backend, or None."""
+    available_voices = get_available_voices_for_backend()
+    if voice in available_voices:
         return voice
     if voice:
-        logger.warning("Ignoring persisted OpenAI startup voice %r; expected one of %s", voice, AVAILABLE_VOICES)
+        logger.warning(
+            "Ignoring persisted startup voice %r for BACKEND_PROVIDER=%r; expected one of %s",
+            voice,
+            config.BACKEND_PROVIDER,
+            available_voices,
+        )
     return None
 
 
@@ -645,8 +649,8 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                 if self.deps.camera_worker is not None:
                     np_img = self.deps.camera_worker.get_latest_frame()
                     if np_img is not None:
-                        # Camera frames are BGR from OpenCV; convert so Gradio displays correct colors.
-                        rgb_frame = cv2.cvtColor(np_img, cv2.COLOR_BGR2RGB)
+                        # Camera frames are BGR; reverse channels without requiring OpenCV in core installs.
+                        rgb_frame = np_img[:, :, ::-1].copy() if np_img.ndim == 3 and np_img.shape[-1] == 3 else np_img
                     else:
                         rgb_frame = None
                     img = gr.Image(value=rgb_frame)
@@ -928,8 +932,8 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                             self._response_started_or_rejected_event.set()
                             logger.error("Realtime error [%s]: %s (raw=%s)", code, msg, err)
 
-                        # Only show user-facing errors, not internal state errors
-                        if code not in ("input_audio_buffer_commit_empty",):
+                        # Only show user-facing errors, not internal state errors.
+                        if code not in ("input_audio_buffer_commit_empty", "conversation_already_has_active_response"):
                             await self.output_queue.put(
                                 AdditionalOutputs({"role": "assistant", "content": f"[error] {msg}"})
                             )
