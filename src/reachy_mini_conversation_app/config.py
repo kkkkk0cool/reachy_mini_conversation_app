@@ -99,7 +99,7 @@ DEFAULT_HF_REALTIME_SESSION_URL = "https://v8si2gztnaqwjvf2.us-east-1.aws.endpoi
 DEFAULT_MODEL_NAME_BY_BACKEND = {
     OPENAI_BACKEND: "gpt-realtime",
     GEMINI_BACKEND: "gemini-3.1-flash-live-preview",
-    HF_BACKEND: "gpt-realtime",
+    HF_BACKEND: "",
 }
 BACKEND_LABEL_BY_PROVIDER = {
     OPENAI_BACKEND: "OpenAI Realtime",
@@ -125,7 +125,7 @@ def _normalize_backend_provider(
     backend_provider: str | None = None,
     model_name: str | None = None,
 ) -> str:
-    """Normalize backend selection, falling back to MODEL_NAME for Gemini auto-detection."""
+    """Normalize the configured backend provider."""
     candidate = (backend_provider or "").strip().lower()
     if candidate in DEFAULT_MODEL_NAME_BY_BACKEND:
         return candidate
@@ -138,6 +138,9 @@ def _resolve_model_name(
 ) -> str:
     """Return a model name that matches the selected backend provider."""
     normalized_backend = _normalize_backend_provider(backend_provider, model_name)
+    if normalized_backend == HF_BACKEND:
+        return DEFAULT_MODEL_NAME_BY_BACKEND[HF_BACKEND]
+
     candidate = (model_name or "").strip()
     if candidate:
         if normalized_backend == GEMINI_BACKEND and _is_gemini_model_name(candidate):

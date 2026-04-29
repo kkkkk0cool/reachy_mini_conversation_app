@@ -630,7 +630,9 @@ class BaseRealtimeHandler(AsyncStreamHandler, ABC):
             "Tools to be used in conversation: %s",
             [tool["name"] for tool in tool_specs],
         )
-        connect_kwargs: dict[str, Any] = {"model": config.MODEL_NAME}
+        connect_kwargs: dict[str, Any] = {}
+        if config.MODEL_NAME:
+            connect_kwargs["model"] = config.MODEL_NAME
         if self._realtime_connect_query:
             connect_kwargs["extra_query"] = self._realtime_connect_query
         async with self.client.realtime.connect(**connect_kwargs) as conn:

@@ -312,6 +312,16 @@ class LocalStream:
         current_backend = get_backend_choice()
         current_model_name = (os.getenv("MODEL_NAME") or "").strip()
         updates = {"BACKEND_PROVIDER": backend}
+        if backend == HF_BACKEND:
+            self._persist_env_values(updates)
+            try:
+                os.environ.pop("MODEL_NAME", None)
+            except Exception:
+                pass
+            self._remove_persisted_env_values(("MODEL_NAME",))
+            refresh_runtime_config_from_env()
+            return
+
         if current_model_name and current_model_name != get_model_name_for_backend(current_backend):
             updates["MODEL_NAME"] = current_model_name
         else:

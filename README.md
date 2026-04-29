@@ -146,7 +146,7 @@ BACKEND_PROVIDER=huggingface
 HF_REALTIME_CONNECTION_MODE=deployed
 ```
 
-Run your own Hugging Face backend using [speech-to-speech](https://github.com/huggingface/speech-to-speech) on the same machine as the conversation app:
+Run your own realtime voice backend using [speech-to-speech](https://github.com/huggingface/speech-to-speech) on the same machine as the conversation app:
 
 ```env
 BACKEND_PROVIDER=huggingface

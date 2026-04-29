@@ -271,9 +271,11 @@ def test_backend_config_persists_local_hf_selection_and_status(
     assert data["requires_restart"] is True
 
     env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    env_lines = env_text.splitlines()
     assert "BACKEND_PROVIDER=huggingface" in env_text
     assert "HF_REALTIME_CONNECTION_MODE=local" in env_text
     assert "HF_REALTIME_WS_URL=ws://localhost:8765/v1/realtime" in env_text
+    assert not any(line.startswith("MODEL_NAME=") for line in env_lines)
 
 
 def test_backend_config_persists_deployed_mode_without_clearing_local_hf_ws_url(

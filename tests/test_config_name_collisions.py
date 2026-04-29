@@ -66,3 +66,9 @@ def test_backend_provider_defaults_to_hf_when_unset() -> None:
     assert config_mod._normalize_backend_provider(None, None) == config_mod.HF_BACKEND
     assert config_mod._normalize_backend_provider(None, "gpt-realtime") == config_mod.HF_BACKEND
     assert config_mod._normalize_backend_provider(None, "gemini-3.1-flash-live-preview") == config_mod.GEMINI_BACKEND
+
+
+def test_huggingface_backend_does_not_resolve_model_name() -> None:
+    """Hugging Face should rely on the server's model selection."""
+    assert config_mod._resolve_model_name(config_mod.HF_BACKEND, None) == ""
+    assert config_mod._resolve_model_name(config_mod.HF_BACKEND, "gpt-realtime") == ""

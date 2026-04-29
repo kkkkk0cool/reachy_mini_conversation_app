@@ -898,6 +898,7 @@ async def test_run_realtime_session_passes_allocated_session_query(monkeypatch: 
 
     await handler._run_realtime_session()
 
+    assert "model" not in captured_connect
     assert captured_connect["extra_query"] == {"session_token": "abc123"}
 
 
