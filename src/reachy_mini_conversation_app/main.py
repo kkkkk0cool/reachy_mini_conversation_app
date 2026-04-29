@@ -190,21 +190,31 @@ def run(
             instance_path=instance_path,
             startup_voice=startup_settings.voice,
         )
+    elif config.BACKEND_PROVIDER == S2S_BACKEND:
+        from reachy_mini_conversation_app.huggingface_realtime import HuggingFaceRealtimeHandler
+
+        transport_label = (
+            "speech-to-speech direct websocket"
+            if get_s2s_connection_mode() == S2S_LOCAL_CONNECTION_MODE
+            else "speech-to-speech session allocator"
+        )
+        logger.info(
+            "Using %s via Hugging Face speech-to-speech realtime handler (%s)",
+            get_backend_label(config.BACKEND_PROVIDER),
+            transport_label,
+        )
+        handler = HuggingFaceRealtimeHandler(
+            deps,
+            gradio_mode=args.gradio,
+            instance_path=instance_path,
+            startup_voice=startup_settings.voice,
+        )  # type: ignore[assignment]
     else:
         from reachy_mini_conversation_app.openai_realtime import OpenaiRealtimeHandler
 
-        if config.BACKEND_PROVIDER == S2S_BACKEND:
-            transport_label = (
-                "speech-to-speech direct websocket"
-                if get_s2s_connection_mode() == S2S_LOCAL_CONNECTION_MODE
-                else "speech-to-speech session allocator"
-            )
-        else:
-            transport_label = "OpenAI Realtime API"
         logger.info(
-            "Using %s via OpenAI-compatible realtime handler (%s)",
+            "Using %s via OpenAI realtime handler (OpenAI Realtime API)",
             get_backend_label(config.BACKEND_PROVIDER),
-            transport_label,
         )
         handler = OpenaiRealtimeHandler(
             deps,

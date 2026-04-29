@@ -20,6 +20,7 @@ from .config import (
     get_available_voices_for_backend,
 )
 from .openai_realtime import OpenaiRealtimeHandler
+from .huggingface_realtime import HuggingFaceRealtimeHandler
 
 
 if TYPE_CHECKING:
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 def mount_personality_routes(
     app: FastAPI,
-    handler: OpenaiRealtimeHandler | GeminiLiveHandler,
+    handler: OpenaiRealtimeHandler | HuggingFaceRealtimeHandler | GeminiLiveHandler,
     get_loop: Callable[[], asyncio.AbstractEventLoop | None],
     *,
     persist_personality: Callable[[Optional[str], Optional[str]], None] | None = None,

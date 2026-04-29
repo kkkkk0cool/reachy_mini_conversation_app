@@ -11,6 +11,7 @@ from fastrtc import AdditionalOutputs
 
 import reachy_mini_conversation_app.openai_realtime as rt_mod
 import reachy_mini_conversation_app.tools.core_tools as ct_mod
+import reachy_mini_conversation_app.huggingface_realtime as hf_mod
 import reachy_mini_conversation_app.tools.background_tool_manager as btm_mod
 from reachy_mini_conversation_app.config import DEFAULT_VOICE, config
 from reachy_mini_conversation_app.openai_realtime import (
@@ -18,6 +19,7 @@ from reachy_mini_conversation_app.openai_realtime import (
     _compute_response_cost,
 )
 from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
+from reachy_mini_conversation_app.huggingface_realtime import HuggingFaceRealtimeHandler
 from reachy_mini_conversation_app.tools.background_tool_manager import ToolCallRoutine
 
 
@@ -328,9 +330,9 @@ async def test_user_speech_events_reset_idle_timer(monkeypatch: Any) -> None:
 @pytest.mark.asyncio
 async def test_partial_transcription_uses_latest_snapshot(monkeypatch: Any) -> None:
     """Partial transcription snapshots should replace older snapshots for the same item."""
-    monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "test")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=DEFAULT_VOICE: "alloy")
-    monkeypatch.setattr(rt_mod, "get_active_tool_specs", lambda _: [])
+    monkeypatch.setattr(hf_mod, "get_session_instructions", lambda: "test")
+    monkeypatch.setattr(hf_mod, "get_session_voice", lambda default=DEFAULT_VOICE: "Aiden")
+    monkeypatch.setattr(hf_mod, "get_active_tool_specs", lambda _: [])
 
     class FakeEvent:
         def __init__(self, etype: str, **kwargs: Any) -> None:
@@ -405,7 +407,7 @@ async def test_partial_transcription_uses_latest_snapshot(monkeypatch: Any) -> N
             self.realtime = FakeRealtime()
 
     deps = ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock())
-    handler = OpenaiRealtimeHandler(deps)
+    handler = HuggingFaceRealtimeHandler(deps)
     fake_client: Any = FakeClient()
     handler.client = fake_client
 
@@ -423,9 +425,9 @@ async def test_partial_transcription_uses_latest_snapshot(monkeypatch: Any) -> N
 @pytest.mark.asyncio
 async def test_output_audio_delta_passes_output_sample_rate_to_head_wobbler(monkeypatch: Any) -> None:
     """Assistant audio deltas should propagate the realtime output sample rate to the head wobbler."""
-    monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "test")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=DEFAULT_VOICE: "alloy")
-    monkeypatch.setattr(rt_mod, "get_active_tool_specs", lambda _: [])
+    monkeypatch.setattr(hf_mod, "get_session_instructions", lambda: "test")
+    monkeypatch.setattr(hf_mod, "get_session_voice", lambda default=DEFAULT_VOICE: "Aiden")
+    monkeypatch.setattr(hf_mod, "get_active_tool_specs", lambda _: [])
     monkeypatch.setattr(config, "BACKEND_PROVIDER", "speech-to-speech")
 
     audio_delta = "AAABAAIAAwA="
@@ -526,7 +528,7 @@ async def test_emit_skips_idle_signal_while_response_active(monkeypatch: Any) ->
     movement_manager = MagicMock()
     movement_manager.is_idle.return_value = True
     deps = ToolDependencies(reachy_mini=MagicMock(), movement_manager=movement_manager)
-    handler = OpenaiRealtimeHandler(deps)
+    handler = HuggingFaceRealtimeHandler(deps)
     handler.last_activity_time = asyncio.get_running_loop().time() - 60.0
     handler._response_done_event.clear()
 
@@ -579,12 +581,11 @@ def test_handler_uses_s2s_startup_voice_at_startup(monkeypatch: Any) -> None:
     """Speech-to-speech startup should restore persisted S2S voices."""
     monkeypatch.setattr(config, "BACKEND_PROVIDER", "speech-to-speech")
 
-    handler = OpenaiRealtimeHandler(
+    handler = HuggingFaceRealtimeHandler(
         ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()),
         startup_voice="Aiden",
     )
 
-    assert rt_mod._normalize_startup_voice("Aiden") == "Aiden"
     assert handler.get_current_voice() == "Aiden"
 
 
@@ -605,6 +606,10 @@ def test_copy_preserves_current_voice_override(monkeypatch: Any) -> None:
 
 def test_format_timestamp_uses_wall_clock() -> None:
     """Test that format_timestamp uses wall clock time."""
+    try:
+        previous_loop = asyncio.get_event_loop()
+    except RuntimeError:
+        previous_loop = asyncio.new_event_loop()
     loop = asyncio.new_event_loop()
     try:
         print("Testing format_timestamp...")
@@ -612,8 +617,8 @@ def test_format_timestamp_uses_wall_clock() -> None:
         formatted = handler.format_timestamp()
         print(f"Formatted timestamp: {formatted}")
     finally:
-        asyncio.set_event_loop(None)
         loop.close()
+        asyncio.set_event_loop(previous_loop)
 
     # Extract year from "[YYYY-MM-DD ...]"
     year = int(formatted[1:5])
@@ -734,7 +739,7 @@ async def test_start_up_s2s_gradio_does_not_wait_for_api_key(monkeypatch: Any) -
     monkeypatch.setattr(config, "OPENAI_API_KEY", None)
 
     deps = ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock())
-    handler = rt_mod.OpenaiRealtimeHandler(deps, gradio_mode=True)
+    handler = hf_mod.HuggingFaceRealtimeHandler(deps, gradio_mode=True)
 
     build_client = AsyncMock(return_value=MagicMock())
     run_realtime_session = AsyncMock(return_value=None)
@@ -754,9 +759,9 @@ async def test_start_up_s2s_gradio_does_not_wait_for_api_key(monkeypatch: Any) -
 @pytest.mark.asyncio
 async def test_run_realtime_session_uses_default_voice_for_lb_allocated_sessions(monkeypatch: Any) -> None:
     """Use the backend default speaker when no profile voice is selected for the s2s LB."""
-    monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "test")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=DEFAULT_VOICE: default)
-    monkeypatch.setattr(rt_mod, "get_active_tool_specs", lambda _: [])
+    monkeypatch.setattr(hf_mod, "get_session_instructions", lambda: "test")
+    monkeypatch.setattr(hf_mod, "get_session_voice", lambda default=DEFAULT_VOICE: default)
+    monkeypatch.setattr(hf_mod, "get_active_tool_specs", lambda _: [])
     monkeypatch.setattr(config, "BACKEND_PROVIDER", "speech-to-speech")
     monkeypatch.setattr(config, "S2S_REALTIME_SESSION_URL", "https://lb.example.test/session")
 
@@ -814,7 +819,7 @@ async def test_run_realtime_session_uses_default_voice_for_lb_allocated_sessions
             self.realtime = FakeRealtime()
 
     deps = ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock())
-    handler = OpenaiRealtimeHandler(deps)
+    handler = HuggingFaceRealtimeHandler(deps)
     fake_client: Any = FakeClient()
     handler.client = fake_client
 
@@ -831,9 +836,9 @@ async def test_run_realtime_session_uses_default_voice_for_lb_allocated_sessions
 @pytest.mark.asyncio
 async def test_run_realtime_session_passes_allocated_session_query(monkeypatch: Any) -> None:
     """Speech-to-speech sessions must forward the allocated session token to the websocket connect call."""
-    monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "test")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=DEFAULT_VOICE: default)
-    monkeypatch.setattr(rt_mod, "get_active_tool_specs", lambda _: [])
+    monkeypatch.setattr(hf_mod, "get_session_instructions", lambda: "test")
+    monkeypatch.setattr(hf_mod, "get_session_voice", lambda default=DEFAULT_VOICE: default)
+    monkeypatch.setattr(hf_mod, "get_active_tool_specs", lambda _: [])
 
     captured_connect: dict[str, Any] = {}
 
@@ -889,7 +894,7 @@ async def test_run_realtime_session_passes_allocated_session_query(monkeypatch: 
         def __init__(self) -> None:
             self.realtime = FakeRealtime()
 
-    handler = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
     fake_client: Any = FakeClient()
     handler.client = fake_client
     handler._realtime_connect_query = {"session_token": "abc123"}
@@ -911,8 +916,8 @@ async def test_build_realtime_client_uses_direct_s2s_ws_url(monkeypatch: Any) ->
     def _unexpected_async_client(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("session allocator should not be called in direct websocket mode")
 
-    monkeypatch.setattr(rt_mod, "AsyncOpenAI", FakeClient)
-    monkeypatch.setattr(rt_mod.httpx, "AsyncClient", _unexpected_async_client)
+    monkeypatch.setattr(hf_mod, "AsyncOpenAI", FakeClient)
+    monkeypatch.setattr(hf_mod.httpx, "AsyncClient", _unexpected_async_client)
     monkeypatch.setattr(config, "BACKEND_PROVIDER", "speech-to-speech")
     monkeypatch.setattr(config, "S2S_REALTIME_CONNECTION_MODE", None)
     monkeypatch.setattr(config, "S2S_REALTIME_SESSION_URL", "https://lb.example.test/session")
@@ -922,7 +927,7 @@ async def test_build_realtime_client_uses_direct_s2s_ws_url(monkeypatch: Any) ->
         "ws://127.0.0.1:8765/v1/realtime?session_token=abc123&model=ignored-by-sdk",
     )
 
-    handler = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
 
     client = await handler._build_realtime_client()
 
@@ -969,14 +974,14 @@ async def test_build_realtime_client_uses_deployed_mode_even_when_direct_s2s_ws_
             requested_session_urls.append(url)
             return FakeResponse()
 
-    monkeypatch.setattr(rt_mod, "AsyncOpenAI", FakeClient)
-    monkeypatch.setattr(rt_mod.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(hf_mod, "AsyncOpenAI", FakeClient)
+    monkeypatch.setattr(hf_mod.httpx, "AsyncClient", FakeAsyncClient)
     monkeypatch.setattr(config, "BACKEND_PROVIDER", "speech-to-speech")
     monkeypatch.setattr(config, "S2S_REALTIME_CONNECTION_MODE", "deployed")
     monkeypatch.setattr(config, "S2S_REALTIME_SESSION_URL", "https://lb.example.test/session")
     monkeypatch.setattr(config, "S2S_REALTIME_WS_URL", "ws://127.0.0.1:8765/v1/realtime")
 
-    handler = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
 
     client = await handler._build_realtime_client()
 
@@ -1001,8 +1006,8 @@ async def test_handler_uses_openai_sample_rate_for_openai_backend(monkeypatch: A
 @pytest.mark.asyncio
 async def test_apply_personality_uses_selected_voice_for_lb_allocated_sessions(monkeypatch: Any) -> None:
     """Live personality updates should honor the selected Qwen CustomVoice speaker."""
-    monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "new instructions")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=DEFAULT_VOICE: "Serena")
+    monkeypatch.setattr(hf_mod, "get_session_instructions", lambda: "new instructions")
+    monkeypatch.setattr(hf_mod, "get_session_voice", lambda default=DEFAULT_VOICE: "Serena")
     monkeypatch.setattr(config, "BACKEND_PROVIDER", "speech-to-speech")
     monkeypatch.setattr(config, "S2S_REALTIME_SESSION_URL", "https://lb.example.test/session")
 
@@ -1015,7 +1020,7 @@ async def test_apply_personality_uses_selected_voice_for_lb_allocated_sessions(m
     class FakeConnection:
         session = FakeSession()
 
-    handler = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
     handler.connection = cast(Any, FakeConnection())
     monkeypatch.setattr(handler, "_restart_session", AsyncMock(return_value=None))
 
@@ -1567,7 +1572,7 @@ async def test_response_sender_loop_times_out_waiting_for_previous_response(
 async def test_openai_excludes_head_tracking_when_no_head_tracker(monkeypatch: Any) -> None:
     """head_tracking tool must not appear in OpenAI session config when head_tracker is not active."""
     monkeypatch.setattr(rt_mod, "get_session_instructions", lambda: "test")
-    monkeypatch.setattr(rt_mod, "get_session_voice", lambda: "alloy")
+    monkeypatch.setattr(rt_mod, "get_session_voice", lambda default=None: "alloy")
 
     # mock ALL_TOOL_SPECS to include at least head_tracking and one other tool, to verify that only head_tracking is excluded, not all tools
     monkeypatch.setattr(
