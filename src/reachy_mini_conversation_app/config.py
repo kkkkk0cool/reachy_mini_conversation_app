@@ -93,6 +93,7 @@ HF_REALTIME_CONNECTION_MODE_ENV = "HF_REALTIME_CONNECTION_MODE"
 HF_REALTIME_WS_URL_ENV = "HF_REALTIME_WS_URL"
 HF_LOCAL_CONNECTION_MODE = "local"
 HF_DEPLOYED_CONNECTION_MODE = "deployed"
+DEFAULT_HF_REALTIME_CONNECTION_MODE = HF_DEPLOYED_CONNECTION_MODE
 # App-managed Hugging Face server allocator. This is intentionally not read
 # from the environment; users who need a custom target should use
 # HF_REALTIME_CONNECTION_MODE=local with HF_REALTIME_WS_URL.
@@ -279,7 +280,10 @@ class Config:
         os.getenv("MODEL_NAME"),
     )
     MODEL_NAME = _resolve_model_name(BACKEND_PROVIDER, os.getenv("MODEL_NAME"))
-    HF_REALTIME_CONNECTION_MODE = _normalize_hf_connection_mode(os.getenv(HF_REALTIME_CONNECTION_MODE_ENV))
+    HF_REALTIME_CONNECTION_MODE = (
+        _normalize_hf_connection_mode(os.getenv(HF_REALTIME_CONNECTION_MODE_ENV))
+        or DEFAULT_HF_REALTIME_CONNECTION_MODE
+    )
     # Deliberately ignore HF_REALTIME_SESSION_URL from the environment; see DEFAULT_HF_REALTIME_SESSION_URL.
     HF_REALTIME_SESSION_URL = DEFAULT_HF_REALTIME_SESSION_URL
     HF_REALTIME_WS_URL = os.getenv(HF_REALTIME_WS_URL_ENV)
@@ -291,7 +295,7 @@ class Config:
         "Backend provider: %s, Model: %s, HF mode: %s, HF session URL set: %s, HF direct URL set: %s, HF_HOME: %s, Vision Model: %s",
         BACKEND_PROVIDER,
         MODEL_NAME,
-        HF_REALTIME_CONNECTION_MODE or "auto",
+        HF_REALTIME_CONNECTION_MODE,
         bool(HF_REALTIME_SESSION_URL and HF_REALTIME_SESSION_URL.strip()),
         bool(HF_REALTIME_WS_URL and HF_REALTIME_WS_URL.strip()),
         HF_HOME,
@@ -380,7 +384,10 @@ def refresh_runtime_config_from_env() -> None:
         os.getenv("MODEL_NAME"),
     )
     config.MODEL_NAME = _resolve_model_name(config.BACKEND_PROVIDER, os.getenv("MODEL_NAME"))
-    config.HF_REALTIME_CONNECTION_MODE = _normalize_hf_connection_mode(os.getenv(HF_REALTIME_CONNECTION_MODE_ENV))
+    config.HF_REALTIME_CONNECTION_MODE = (
+        _normalize_hf_connection_mode(os.getenv(HF_REALTIME_CONNECTION_MODE_ENV))
+        or DEFAULT_HF_REALTIME_CONNECTION_MODE
+    )
     # Deliberately ignore HF_REALTIME_SESSION_URL from the environment; see DEFAULT_HF_REALTIME_SESSION_URL.
     config.HF_REALTIME_SESSION_URL = DEFAULT_HF_REALTIME_SESSION_URL
     config.HF_REALTIME_WS_URL = os.getenv(HF_REALTIME_WS_URL_ENV)
@@ -433,40 +440,19 @@ def get_hf_direct_ws_url() -> str | None:
     return value or None
 
 
-def _resolve_hf_connection_mode(
-    configured_mode: str | None,
-    *,
-    session_url: str | None,
-    direct_ws_url: str | None,
-) -> str:
-    """Return the explicit Hugging Face mode or infer one from available targets."""
-    if configured_mode is not None:
-        return configured_mode
-    if direct_ws_url:
-        return HF_LOCAL_CONNECTION_MODE
-    if session_url:
-        return HF_DEPLOYED_CONNECTION_MODE
-    return HF_LOCAL_CONNECTION_MODE
-
-
 def get_hf_connection_selection() -> HFConnectionSelection:
     """Resolve the selected Hugging Face connection mode and whether it is usable."""
     session_url = get_hf_session_url()
     direct_ws_url = get_hf_direct_ws_url()
-    mode = _resolve_hf_connection_mode(
-        _normalize_hf_connection_mode(getattr(config, "HF_REALTIME_CONNECTION_MODE", None)),
-        session_url=session_url,
-        direct_ws_url=direct_ws_url,
-    )
+    mode = _normalize_hf_connection_mode(getattr(config, "HF_REALTIME_CONNECTION_MODE", None))
+    if mode is None:
+        raise RuntimeError(f"{HF_REALTIME_CONNECTION_MODE_ENV} must be set to local or deployed.")
 
-    target_by_mode = {
-        HF_LOCAL_CONNECTION_MODE: direct_ws_url,
-        HF_DEPLOYED_CONNECTION_MODE: session_url,
-    }
+    target = direct_ws_url if mode == HF_LOCAL_CONNECTION_MODE else session_url
 
     return HFConnectionSelection(
         mode=mode,
-        has_target=bool(target_by_mode[mode]),
+        has_target=bool(target),
         session_url=session_url,
         direct_ws_url=direct_ws_url,
     )

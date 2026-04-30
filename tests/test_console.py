@@ -226,7 +226,7 @@ def test_backend_config_persists_local_hf_selection_and_status(
     """Settings API should persist a direct Hugging Face websocket target."""
     monkeypatch.setattr(config, "BACKEND_PROVIDER", "openai")
     monkeypatch.setattr(config, "MODEL_NAME", "gpt-realtime")
-    monkeypatch.setattr(config, "HF_REALTIME_CONNECTION_MODE", None)
+    monkeypatch.setattr(config, "HF_REALTIME_CONNECTION_MODE", "deployed")
     monkeypatch.setattr(config, "HF_REALTIME_SESSION_URL", None)
     monkeypatch.setattr(config, "HF_REALTIME_WS_URL", None)
     monkeypatch.setenv("BACKEND_PROVIDER", "openai")
@@ -286,7 +286,7 @@ def test_backend_config_persists_deployed_mode_without_clearing_local_hf_ws_url(
 
     monkeypatch.setattr(config, "BACKEND_PROVIDER", "huggingface")
     monkeypatch.setattr(config, "MODEL_NAME", "gpt-realtime")
-    monkeypatch.setattr(config, "HF_REALTIME_CONNECTION_MODE", None)
+    monkeypatch.setattr(config, "HF_REALTIME_CONNECTION_MODE", "deployed")
     monkeypatch.setattr(config, "HF_REALTIME_SESSION_URL", "https://lb.example.test/session")
     monkeypatch.setattr(config, "HF_REALTIME_WS_URL", "ws://localhost:8765/v1/realtime")
     monkeypatch.setenv("BACKEND_PROVIDER", "huggingface")
@@ -377,7 +377,7 @@ def test_backend_config_rejects_invalid_hf_port_zero(
 ) -> None:
     """Settings API should reject invalid local Hugging Face ports from direct callers."""
     monkeypatch.setattr(config, "BACKEND_PROVIDER", "huggingface")
-    monkeypatch.setattr(config, "HF_REALTIME_CONNECTION_MODE", None)
+    monkeypatch.setattr(config, "HF_REALTIME_CONNECTION_MODE", "deployed")
     monkeypatch.setattr(config, "HF_REALTIME_SESSION_URL", None)
     monkeypatch.setattr(config, "HF_REALTIME_WS_URL", None)
 
@@ -407,7 +407,7 @@ def test_status_reports_direct_hf_ws_url_as_ready(
 ) -> None:
     """Settings API should treat a direct Hugging Face websocket as a valid configuration."""
     monkeypatch.setattr(config, "BACKEND_PROVIDER", "huggingface")
-    monkeypatch.setattr(config, "HF_REALTIME_CONNECTION_MODE", None)
+    monkeypatch.setattr(config, "HF_REALTIME_CONNECTION_MODE", "local")
     monkeypatch.setattr(config, "HF_REALTIME_SESSION_URL", None)
     monkeypatch.setattr(config, "HF_REALTIME_WS_URL", "ws://127.0.0.1:8765/v1/realtime")
 

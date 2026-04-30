@@ -921,7 +921,7 @@ async def test_build_realtime_client_uses_direct_hf_ws_url(monkeypatch: Any) -> 
     monkeypatch.setattr(hf_mod, "AsyncOpenAI", FakeClient)
     monkeypatch.setattr(hf_mod.httpx, "AsyncClient", _unexpected_async_client)
     monkeypatch.setattr(config, "BACKEND_PROVIDER", "huggingface")
-    monkeypatch.setattr(config, "HF_REALTIME_CONNECTION_MODE", None)
+    monkeypatch.setattr(config, "HF_REALTIME_CONNECTION_MODE", "local")
     monkeypatch.setattr(config, "HF_REALTIME_SESSION_URL", "https://lb.example.test/session")
     monkeypatch.setattr(
         config,

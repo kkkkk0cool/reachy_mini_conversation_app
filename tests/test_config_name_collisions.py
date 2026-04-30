@@ -79,12 +79,11 @@ def test_huggingface_backend_does_not_resolve_model_name() -> None:
     [
         ("local", "https://hf.example.test/session", None, "local", False),
         ("deployed", "https://hf.example.test/session", "ws://127.0.0.1:8765/v1/realtime", "deployed", True),
-        (None, None, "ws://127.0.0.1:8765/v1/realtime", "local", True),
-        (None, "https://hf.example.test/session", None, "deployed", True),
-        (None, None, None, "local", False),
+        ("local", None, "ws://127.0.0.1:8765/v1/realtime", "local", True),
+        ("deployed", None, "ws://127.0.0.1:8765/v1/realtime", "deployed", False),
     ],
 )
-def test_hf_connection_selection_resolves_mode_then_target(
+def test_hf_connection_selection_uses_explicit_mode_for_target(
     monkeypatch: pytest.MonkeyPatch,
     configured_mode: str | None,
     session_url: str | None,
@@ -92,7 +91,7 @@ def test_hf_connection_selection_resolves_mode_then_target(
     expected_mode: str,
     expected_has_target: bool,
 ) -> None:
-    """Hugging Face selection should separate mode choice from target availability."""
+    """Hugging Face selection should use the configured mode without inferring from URLs."""
     monkeypatch.setattr(config_mod.config, "HF_REALTIME_CONNECTION_MODE", configured_mode)
     monkeypatch.setattr(config_mod.config, "HF_REALTIME_SESSION_URL", session_url)
     monkeypatch.setattr(config_mod.config, "HF_REALTIME_WS_URL", direct_ws_url)
@@ -103,3 +102,13 @@ def test_hf_connection_selection_resolves_mode_then_target(
     assert selection.has_target is expected_has_target
     assert selection.session_url == session_url
     assert selection.direct_ws_url == direct_ws_url
+
+
+def test_hf_connection_selection_requires_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hugging Face selection should fail instead of inferring a missing mode."""
+    monkeypatch.setattr(config_mod.config, "HF_REALTIME_CONNECTION_MODE", None)
+    monkeypatch.setattr(config_mod.config, "HF_REALTIME_SESSION_URL", "https://hf.example.test/session")
+    monkeypatch.setattr(config_mod.config, "HF_REALTIME_WS_URL", "ws://127.0.0.1:8765/v1/realtime")
+
+    with pytest.raises(RuntimeError, match="HF_REALTIME_CONNECTION_MODE must be set"):
+        config_mod.get_hf_connection_selection()
