@@ -35,12 +35,12 @@ logger = logging.getLogger(__name__)
 
 def _build_openai_compatible_client_from_realtime_url(
     realtime_url: str,
-    api_key: str | None,
+    bearer_token: str | None,
 ) -> tuple[AsyncOpenAI, dict[str, str]]:
     """Build an OpenAI-compatible realtime client from a direct websocket/base URL."""
     parsed = parse_hf_realtime_url(realtime_url)
     client = AsyncOpenAI(
-        api_key=api_key or "DUMMY",
+        api_key=bearer_token or "DUMMY",
         base_url=parsed.base_url,
         websocket_base_url=parsed.websocket_base_url,
     )
@@ -64,7 +64,6 @@ class HuggingFaceRealtimeHandler(BaseRealtimeHandler):
 
     BACKEND_PROVIDER = HF_BACKEND
     SAMPLE_RATE = 16000
-    REQUIRES_API_KEY = False
     REFRESH_CLIENT_ON_RECONNECT = True
     AUDIO_INPUT_COST_PER_1M = 0.0
     AUDIO_OUTPUT_COST_PER_1M = 0.0
@@ -116,11 +115,9 @@ class HuggingFaceRealtimeHandler(BaseRealtimeHandler):
         input_transcript.item_id = item_id
         input_transcript.deltas = [delta]
 
-    async def _build_realtime_client(self, api_key: str | None = None) -> AsyncOpenAI:
+    async def _build_realtime_client(self) -> AsyncOpenAI:
         """Build the Hugging Face OpenAI-compatible realtime client."""
-        if api_key:
-            logger.debug("Ignoring non-Hugging Face api_key argument for Hugging Face realtime client.")
-        resolved_api_key = (config.HF_TOKEN or "").strip()
+        bearer_token = (config.HF_TOKEN or "").strip()
         connection_selection = get_hf_connection_selection()
         direct_realtime_url = get_hf_direct_ws_url()
         if connection_selection.mode == HF_LOCAL_CONNECTION_MODE:
@@ -128,7 +125,7 @@ class HuggingFaceRealtimeHandler(BaseRealtimeHandler):
                 raise RuntimeError("HF_REALTIME_WS_URL must be set when HF_REALTIME_CONNECTION_MODE=local")
             client, connect_query = _build_openai_compatible_client_from_realtime_url(
                 direct_realtime_url,
-                resolved_api_key,
+                bearer_token,
             )
             self._realtime_connect_query = connect_query
             logger.info("Using direct Hugging Face realtime endpoint %s", direct_realtime_url)
@@ -156,7 +153,7 @@ class HuggingFaceRealtimeHandler(BaseRealtimeHandler):
         logger.info("Allocated realtime session %s", payload.get("session_id") or "<unknown>")
         client, connect_query = _build_openai_compatible_client_from_realtime_url(
             connect_url,
-            resolved_api_key,
+            bearer_token,
         )
         self._realtime_connect_query = connect_query
         return client

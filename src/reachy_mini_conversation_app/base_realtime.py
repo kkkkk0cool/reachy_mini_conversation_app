@@ -6,7 +6,7 @@ import random
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Final, Tuple, Literal, ClassVar, Optional
+from typing import Any, Final, Tuple, ClassVar, Optional
 from datetime import datetime
 
 import numpy as np
@@ -77,27 +77,11 @@ def to_realtime_tools_config(tool_specs: list[dict[str, Any]]) -> RealtimeToolsC
     return realtime_tools
 
 
-def _normalize_startup_voice(voice: str | None) -> str | None:
-    """Return a valid persisted startup voice for the active backend, or None."""
-    available_voices = get_available_voices_for_backend()
-    if voice in available_voices:
-        return voice
-    if voice:
-        logger.warning(
-            "Ignoring persisted startup voice %r for BACKEND_PROVIDER=%r; expected one of %s",
-            voice,
-            config.BACKEND_PROVIDER,
-            available_voices,
-        )
-    return None
-
-
 class BaseRealtimeHandler(ConversationHandler, ABC):
     """Shared realtime stream handler for OpenAI-compatible client APIs."""
 
     BACKEND_PROVIDER: ClassVar[str]
     SAMPLE_RATE: ClassVar[int]
-    REQUIRES_API_KEY: ClassVar[bool]
     REFRESH_CLIENT_ON_RECONNECT: ClassVar[bool]
     AUDIO_INPUT_COST_PER_1M: ClassVar[float]
     AUDIO_OUTPUT_COST_PER_1M: ClassVar[float]
@@ -108,7 +92,6 @@ class BaseRealtimeHandler(ConversationHandler, ABC):
     _REQUIRED_PROVIDER_CONFIG: ClassVar[tuple[str, ...]] = (
         "BACKEND_PROVIDER",
         "SAMPLE_RATE",
-        "REQUIRES_API_KEY",
         "REFRESH_CLIENT_ON_RECONNECT",
         "AUDIO_INPUT_COST_PER_1M",
         "AUDIO_OUTPUT_COST_PER_1M",
@@ -154,9 +137,6 @@ class BaseRealtimeHandler(ConversationHandler, ABC):
         self.gradio_mode = gradio_mode
         self.instance_path = instance_path
         self._voice_override: str | None = self._normalize_startup_voice(startup_voice)
-        # Track how the API key was provided (env vs textbox) and its value
-        self._key_source: Literal["env", "textbox"] = "env"
-        self._provided_api_key: str | None = None
         self._realtime_connect_query: dict[str, str] = {}
 
         # Debouncing for partial transcripts
@@ -1000,7 +980,7 @@ class BaseRealtimeHandler(ConversationHandler, ABC):
         return get_available_voices_for_backend(self.BACKEND_PROVIDER)
 
     @abstractmethod
-    async def _build_realtime_client(self, api_key: str | None = None) -> AsyncOpenAI:
+    async def _build_realtime_client(self) -> AsyncOpenAI:
         """Build the realtime SDK client for this backend."""
 
     async def send_idle_signal(self, idle_duration: float) -> None:

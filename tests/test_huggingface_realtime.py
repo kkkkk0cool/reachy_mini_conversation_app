@@ -470,7 +470,7 @@ async def test_build_realtime_client_uses_direct_hf_ws_url(monkeypatch: Any) -> 
 
     handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
 
-    client = await handler._build_realtime_client(api_key="sk-openai-secret")
+    client = await handler._build_realtime_client()
 
     assert client is not None
     assert captured_client_kwargs["api_key"] == "DUMMY"

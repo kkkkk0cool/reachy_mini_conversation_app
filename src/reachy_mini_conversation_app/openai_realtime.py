@@ -1,5 +1,5 @@
 import logging
-from typing import Any
+from typing import Any, Literal
 from pathlib import Path
 
 from openai import AsyncOpenAI
@@ -16,7 +16,7 @@ from openai.types.realtime.realtime_audio_input_turn_detection_param import Serv
 from reachy_mini_conversation_app.config import OPENAI_BACKEND, config, get_default_voice_for_backend
 from reachy_mini_conversation_app.prompts import get_session_voice, get_session_instructions
 from reachy_mini_conversation_app.base_realtime import BaseRealtimeHandler, to_realtime_tools_config
-from reachy_mini_conversation_app.tools.core_tools import get_active_tool_specs
+from reachy_mini_conversation_app.tools.core_tools import ToolDependencies, get_active_tool_specs
 
 
 logger = logging.getLogger(__name__)
@@ -29,13 +29,24 @@ class OpenaiRealtimeHandler(BaseRealtimeHandler):
 
     BACKEND_PROVIDER = OPENAI_BACKEND
     SAMPLE_RATE = 24000
-    REQUIRES_API_KEY = True
     REFRESH_CLIENT_ON_RECONNECT = False
     AUDIO_INPUT_COST_PER_1M = 32.0
     AUDIO_OUTPUT_COST_PER_1M = 64.0
     TEXT_INPUT_COST_PER_1M = 4.0
     TEXT_OUTPUT_COST_PER_1M = 16.0
     IMAGE_INPUT_COST_PER_1M = 5.0
+
+    def __init__(
+        self,
+        deps: ToolDependencies,
+        gradio_mode: bool = False,
+        instance_path: str | None = None,
+        startup_voice: str | None = None,
+    ) -> None:
+        """Initialize OpenAI-specific credential state."""
+        super().__init__(deps, gradio_mode, instance_path, startup_voice)
+        self._key_source: Literal["env", "textbox"] = "env"
+        self._provided_api_key: str | None = None
 
     async def _prepare_startup_credentials(self) -> None:
         """Collect an OpenAI API key from Gradio input when needed."""
@@ -198,10 +209,10 @@ class OpenaiRealtimeHandler(BaseRealtimeHandler):
         except Exception:
             return fallback
 
-    async def _build_realtime_client(self, api_key: str | None = None) -> AsyncOpenAI:
+    async def _build_realtime_client(self) -> AsyncOpenAI:
         """Build the OpenAI realtime SDK client."""
         self._realtime_connect_query = {}
-        resolved_api_key = (api_key or self._provided_api_key or config.OPENAI_API_KEY or "").strip()
+        resolved_api_key = (self._provided_api_key or config.OPENAI_API_KEY or "").strip()
         if not resolved_api_key:
             # In headless console mode, LocalStream blocks startup until the key is provided.
             # Unit tests may invoke this handler directly with a stubbed client.
