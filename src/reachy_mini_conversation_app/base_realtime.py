@@ -18,6 +18,8 @@ from numpy.typing import NDArray
 from scipy.signal import resample
 from openai.types.realtime import (
     RealtimeAudioConfigParam,
+    RealtimeToolsConfigParam,
+    RealtimeFunctionToolParam,
     RealtimeAudioConfigOutputParam,
     RealtimeResponseCreateParamsParam,
     RealtimeSessionCreateRequestParam,
@@ -49,6 +51,29 @@ class InputTranscriptChunksByItem(BaseModel):
 
     item_id: str | None = None
     deltas: list[str] = Field(default_factory=list)
+
+
+def to_realtime_tools_config(tool_specs: list[dict[str, Any]]) -> RealtimeToolsConfigParam:
+    """Convert app tool specs to the OpenAI-compatible realtime session shape."""
+    realtime_tools: RealtimeToolsConfigParam = []
+    for spec in tool_specs:
+        tool_type = spec.get("type")
+        name = spec.get("name")
+        description = spec.get("description")
+        parameters = spec.get("parameters", {})
+
+        if tool_type != "function" or not isinstance(name, str):
+            raise ValueError(f"Unsupported realtime tool spec: {spec!r}")
+
+        realtime_tool = RealtimeFunctionToolParam(
+            type="function",
+            name=name,
+            parameters=parameters,
+        )
+        if isinstance(description, str):
+            realtime_tool["description"] = description
+        realtime_tools.append(realtime_tool)
+    return realtime_tools
 
 
 def _normalize_startup_voice(voice: str | None) -> str | None:

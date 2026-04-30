@@ -1,9 +1,10 @@
 import logging
-from typing import Any, cast
+from typing import Any
 from urllib.parse import urlsplit, parse_qsl, urlunsplit
 
 import httpx
 from openai import AsyncOpenAI
+from typing_extensions import Literal, TypedDict
 from openai.types.realtime import (
     AudioTranscriptionParam,
     RealtimeAudioConfigParam,
@@ -11,7 +12,6 @@ from openai.types.realtime import (
     RealtimeAudioConfigOutputParam,
     RealtimeSessionCreateRequestParam,
 )
-from openai.types.realtime.realtime_audio_formats_param import AudioPCM
 from openai.types.realtime.realtime_audio_input_turn_detection_param import ServerVad
 
 from reachy_mini_conversation_app.config import (
@@ -25,6 +25,7 @@ from reachy_mini_conversation_app.prompts import get_session_voice, get_session_
 from reachy_mini_conversation_app.base_realtime import (
     BaseRealtimeHandler,
     InputTranscriptChunksByItem,
+    to_realtime_tools_config,
 )
 from reachy_mini_conversation_app.tools.core_tools import get_active_tool_specs
 
@@ -64,11 +65,16 @@ def _build_openai_compatible_client_from_realtime_url(
     return client, connect_query
 
 
-def _native_rate_audio_pcm() -> AudioPCM:
-    """Return the Hugging Face native-rate PCM config for the OpenAI SDK payload."""
-    # The OpenAI SDK type is centered on OpenAI's 24 kHz realtime audio. The
-    # Hugging Face compatible server uses rate=None as its native 16 kHz mode.
-    return cast(AudioPCM, {"type": "audio/pcm", "rate": None})
+class HFNativeRateAudioPCM(TypedDict):
+    """Hugging Face extension for native-rate PCM audio."""
+
+    type: Literal["audio/pcm"]
+    rate: None
+
+
+def _native_rate_audio_pcm() -> HFNativeRateAudioPCM:
+    """Return the Hugging Face native-rate PCM config."""
+    return {"type": "audio/pcm", "rate": None}
 
 
 class HuggingFaceRealtimeHandler(BaseRealtimeHandler):
@@ -103,16 +109,18 @@ class HuggingFaceRealtimeHandler(BaseRealtimeHandler):
             instructions=self._get_session_instructions(),
             audio=RealtimeAudioConfigParam(
                 input=RealtimeAudioConfigInputParam(
-                    format=_native_rate_audio_pcm(),
+                    # The OpenAI SDK type only includes 24 kHz PCM, but the HF
+                    # compatible server uses rate=None for native 16 kHz mode.
+                    format=_native_rate_audio_pcm(),  # type: ignore[typeddict-item]
                     transcription=AudioTranscriptionParam(model="gpt-4o-transcribe", language="en"),
                     turn_detection=ServerVad(type="server_vad", interrupt_response=True),
                 ),
                 output=RealtimeAudioConfigOutputParam(
-                    format=_native_rate_audio_pcm(),
+                    format=_native_rate_audio_pcm(),  # type: ignore[typeddict-item]
                     voice=self.get_current_voice(),
                 ),
             ),
-            tools=cast(Any, tool_specs),
+            tools=to_realtime_tools_config(tool_specs),
             tool_choice="auto",
         )
 

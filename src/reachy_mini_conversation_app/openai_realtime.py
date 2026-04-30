@@ -1,5 +1,5 @@
 import logging
-from typing import Any, cast
+from typing import Any
 from pathlib import Path
 
 from openai import AsyncOpenAI
@@ -15,7 +15,7 @@ from openai.types.realtime.realtime_audio_input_turn_detection_param import Serv
 
 from reachy_mini_conversation_app.config import OPENAI_BACKEND, config, get_default_voice_for_backend
 from reachy_mini_conversation_app.prompts import get_session_voice, get_session_instructions
-from reachy_mini_conversation_app.base_realtime import BaseRealtimeHandler
+from reachy_mini_conversation_app.base_realtime import BaseRealtimeHandler, to_realtime_tools_config
 from reachy_mini_conversation_app.tools.core_tools import get_active_tool_specs
 
 
@@ -137,7 +137,7 @@ class OpenaiRealtimeHandler(BaseRealtimeHandler):
                     voice=self.get_current_voice(),
                 ),
             ),
-            tools=cast(Any, tool_specs),
+            tools=to_realtime_tools_config(tool_specs),
             tool_choice="auto",
         )
 
