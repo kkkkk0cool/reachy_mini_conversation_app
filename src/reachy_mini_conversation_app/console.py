@@ -79,7 +79,7 @@ class LocalStreamHandler(Protocol):
 
     deps: Any
     output_queue: asyncio.Queue[Any]
-    _clear_queue: Callable[[], None]
+    _clear_queue: Callable[[], None] | None
 
     async def start_up(self) -> None:
         """Start the realtime handler."""
