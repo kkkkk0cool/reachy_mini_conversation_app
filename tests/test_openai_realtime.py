@@ -1154,16 +1154,15 @@ async def test_response_sender_retries_when_active_response_error_uses_type_only
         async def create(self, **_kw: Any) -> None:
             self.call_count += 1
             if self.call_count == 1:
-                await event_queue.put(
+                event_queue.put_nowait(
                     FakeEvent(
                         "error",
                         error=FakeError("Cannot create response while another response is in progress."),
                     )
                 )
             else:
-                await event_queue.put(FakeEvent("response.created"))
-            await asyncio.sleep(0)
-            await event_queue.put(FakeEvent("response.done", response=MagicMock()))
+                event_queue.put_nowait(FakeEvent("response.created"))
+                event_queue.put_nowait(FakeEvent("response.done", response=MagicMock()))
 
         async def cancel(self, **_kw: Any) -> None:
             pass

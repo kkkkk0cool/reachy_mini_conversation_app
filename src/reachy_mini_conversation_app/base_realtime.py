@@ -442,8 +442,9 @@ class BaseRealtimeHandler(AsyncStreamHandler, ABC):
         For each queued request the worker:
         1. Waits until no response is active (_response_done_event).
         2. Sends response.create().
-        3. Waits for the response cycle to complete (response.done).
-        4. If the server rejected with active_response, retries from step 1.
+        3. Waits until the receiver observes response.created or a rejection.
+        4. Waits for the response cycle to complete (response.done).
+        5. If the server rejected with active_response, retries from step 1.
         """
         while self.connection:
             try:
@@ -468,6 +469,7 @@ class BaseRealtimeHandler(AsyncStreamHandler, ABC):
                     break
 
                 self._last_response_rejected = False
+                self._response_started_or_rejected_event.clear()
                 try:
                     await self.connection.response.create(**kwargs)
                 except Exception as e:
@@ -475,7 +477,15 @@ class BaseRealtimeHandler(AsyncStreamHandler, ABC):
                     self._response_done_event.set()
                     break
 
-                # Check if we were rejected
+                try:
+                    await asyncio.wait_for(
+                        self._response_started_or_rejected_event.wait(),
+                        timeout=self._response_done_timeout(),
+                    )
+                except asyncio.TimeoutError:
+                    logger.debug("Timed out waiting for response.created or response rejection")
+
+                # Check if the receiver loop observed an asynchronous rejection.
                 if self._last_response_rejected:
                     attempts += 1
                     if attempts >= max_retries:
@@ -724,6 +734,7 @@ class BaseRealtimeHandler(AsyncStreamHandler, ABC):
                     if event.type == "response.done":
                         # Doesn't mean the audio is done playing
                         self._response_done_event.set()
+                        self._response_started_or_rejected_event.set()
                         self.is_idle_tool_call = False
                         logger.debug("Response done")
 
