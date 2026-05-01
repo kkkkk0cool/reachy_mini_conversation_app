@@ -20,7 +20,7 @@ from datetime import datetime
 import numpy as np
 import gradio as gr
 from google import genai
-from fastrtc import AdditionalOutputs, AsyncStreamHandler, wait_for_item, audio_to_int16
+from fastrtc import AdditionalOutputs, wait_for_item, audio_to_int16
 from google.genai import types
 from numpy.typing import NDArray
 from scipy.signal import resample
@@ -36,6 +36,7 @@ from reachy_mini_conversation_app.tools.core_tools import (
     ToolDependencies,
     get_active_tool_specs,
 )
+from reachy_mini_conversation_app.conversation_handler import ConversationHandler
 from reachy_mini_conversation_app.camera_frame_encoding import encode_bgr_frame_as_jpeg
 from reachy_mini_conversation_app.tools.background_tool_manager import (
     ToolCallRoutine,
@@ -137,7 +138,7 @@ def _resolve_gemini_startup_voice(voice: str | None) -> str | None:
     return resolved
 
 
-class GeminiLiveHandler(AsyncStreamHandler):
+class GeminiLiveHandler(ConversationHandler):
     """Gemini Live API handler for fastrtc Stream."""
 
     def __init__(

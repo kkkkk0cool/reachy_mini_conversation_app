@@ -274,7 +274,7 @@ body {
   border-color: rgba(76, 224, 179, 0.4);
 }
 
-.hidden { display: none; }
+.hidden { display: none !important; }
 label {
   display: block;
   margin: 8px 0 6px;
@@ -350,6 +350,28 @@ button.ghost:hover { border-color: rgba(94, 240, 193, 0.4); }
 .status.ok { color: var(--ok); }
 .status.warn { color: var(--warn); }
 .status.error { color: var(--error); }
+.hf-help {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.hf-help a {
+  color: var(--accent);
+  text-underline-offset: 2px;
+}
+.hf-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+.hf-local-note {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.hf-field {
+  min-width: 0;
+}
 
 /* Personality layout */
 .row {
@@ -439,6 +461,7 @@ button.ghost:hover { border-color: rgba(94, 240, 193, 0.4); }
   .hero h1 { font-size: 26px; }
   .privacy-notice { padding: 10px 12px; }
   .backend-choice-grid { grid-template-columns: 1fr; }
+  .hf-config-grid { grid-template-columns: 1fr; }
   .row { grid-template-columns: 1fr; }
   #personality-panel .row:first-of-type { grid-template-columns: 1fr; }
   button { width: 100%; justify-content: center; }
