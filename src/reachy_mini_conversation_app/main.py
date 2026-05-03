@@ -50,9 +50,17 @@ def run(
         HF_BACKEND,
         GEMINI_BACKEND,
         OPENAI_BACKEND,
+        GLM_BACKEND,
+        GLM_CHAT_BACKEND,
+        FUNASR_PIPELINE_BACKEND,
+        REMOTE_BACKEND,
         HF_LOCAL_CONNECTION_MODE,
         config,
         is_gemini_model,
+        is_glm_model,
+        is_glm_chat_model,
+        is_funasr_pipeline_model,
+        is_remote_backend,
         get_backend_label,
         get_hf_connection_selection,
         refresh_runtime_config_from_env,
@@ -176,7 +184,21 @@ def run(
     )
     logger.debug(f"Chatbot avatar images: {chatbot.avatar_images}")
 
-    if is_gemini_model():
+    if is_remote_backend():
+        from reachy_mini_conversation_app.remote_conversation_handler import RemoteConversationHandler
+
+        logger.info(
+            "Using %s via RemoteConversationHandler → %s",
+            get_backend_label(config.BACKEND_PROVIDER),
+            config.CONVERSATION_SERVICE_URL or "(CONVERSATION_SERVICE_URL not set)",
+        )
+        handler = RemoteConversationHandler(
+            deps,
+            gradio_mode=args.gradio,
+            instance_path=instance_path,
+            startup_voice=startup_settings.voice,
+        )  # type: ignore[assignment]
+    elif is_gemini_model():
         from reachy_mini_conversation_app.gemini_live import GeminiLiveHandler
 
         logger.info(
@@ -189,6 +211,45 @@ def run(
             instance_path=instance_path,
             startup_voice=startup_settings.voice,
         )
+    elif is_funasr_pipeline_model():
+        from reachy_mini_conversation_app.funasr_pipeline import FunASRPipelineHandler
+
+        logger.info(
+            "Using %s via FunASRPipelineHandler",
+            get_backend_label(config.BACKEND_PROVIDER),
+        )
+        handler = FunASRPipelineHandler(
+            deps,
+            gradio_mode=args.gradio,
+            instance_path=instance_path,
+            startup_voice=startup_settings.voice,
+        )  # type: ignore[assignment]
+    elif is_glm_chat_model():
+        from reachy_mini_conversation_app.glm_chat_pipeline import GlmChatPipelineHandler
+
+        logger.info(
+            "Using %s via GlmChatPipelineHandler (Whisper ASR + GLM-4.x Chat + Edge-TTS)",
+            get_backend_label(config.BACKEND_PROVIDER),
+        )
+        handler = GlmChatPipelineHandler(
+            deps,
+            gradio_mode=args.gradio,
+            instance_path=instance_path,
+            startup_voice=startup_settings.voice,
+        )  # type: ignore[assignment]
+    elif is_glm_model():
+        from reachy_mini_conversation_app.glm_realtime import GlmRealtimeHandler
+
+        logger.info(
+            "Using %s via GlmRealtimeHandler",
+            get_backend_label(config.BACKEND_PROVIDER),
+        )
+        handler = GlmRealtimeHandler(
+            deps,
+            gradio_mode=args.gradio,
+            instance_path=instance_path,
+            startup_voice=startup_settings.voice,
+        )  # type: ignore[assignment]
     elif config.BACKEND_PROVIDER == HF_BACKEND:
         from reachy_mini_conversation_app.huggingface_realtime import HuggingFaceRealtimeHandler
 
@@ -232,14 +293,38 @@ def run(
         personality_ui.create_components()
         additional_inputs: list[Any] = [chatbot, *personality_ui.additional_inputs_ordered()]
 
-        if config.BACKEND_PROVIDER in {OPENAI_BACKEND, GEMINI_BACKEND}:
+        if config.BACKEND_PROVIDER in {
+            OPENAI_BACKEND, GEMINI_BACKEND, GLM_BACKEND, GLM_CHAT_BACKEND,
+            FUNASR_PIPELINE_BACKEND, REMOTE_BACKEND,
+        }:
             uses_gemini_backend = is_gemini_model()
+            uses_glm_backend = is_glm_model() or is_glm_chat_model()
+            uses_funasr = is_funasr_pipeline_model()
+            uses_remote = is_remote_backend()
+            if uses_remote:
+                api_key_label = "Remote Server URL"
+                api_key_env_value = config.CONVERSATION_SERVICE_URL or ""
+            elif uses_gemini_backend:
+                api_key_label = "GEMINI_API_KEY"
+                api_key_env_value = os.getenv("GEMINI_API_KEY")
+            elif uses_glm_backend:
+                api_key_label = "GLM_API_KEY"
+                api_key_env_value = os.getenv("GLM_API_KEY") or os.getenv("ZHIPUAI_API_KEY")
+            elif uses_funasr:
+                provider = (config.TEXT_LLM_PROVIDER or "qwen").lower()
+                if provider == "deepseek":
+                    api_key_label = "DEEPSEEK_API_KEY"
+                    api_key_env_value = os.getenv("DEEPSEEK_API_KEY")
+                else:
+                    api_key_label = "QWEN_API_KEY (DashScope)"
+                    api_key_env_value = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+            else:
+                api_key_label = "OPENAI API Key"
+                api_key_env_value = os.getenv("OPENAI_API_KEY")
             api_key_textbox = gr.Textbox(
-                label="GEMINI_API_KEY" if uses_gemini_backend else "OPENAI API Key",
+                label=api_key_label,
                 type="password",
-                value=(os.getenv("GEMINI_API_KEY") if uses_gemini_backend else os.getenv("OPENAI_API_KEY"))
-                if not get_space()
-                else "",
+                value=api_key_env_value if not get_space() else "",
             )
             additional_inputs.insert(1, api_key_textbox)
 

@@ -28,6 +28,7 @@ from reachy_mini_conversation_app.config import (
     GEMINI_BACKEND,
     LOCKED_PROFILE,
     OPENAI_BACKEND,
+    REMOTE_BACKEND,
     HF_REALTIME_WS_URL_ENV,
     HF_LOCAL_CONNECTION_MODE,
     HF_DEPLOYED_CONNECTION_MODE,
@@ -171,6 +172,8 @@ class LocalStream:
 
     def _has_required_key(self, backend: str) -> bool:
         """Return whether the requested backend has its required credential."""
+        if backend == REMOTE_BACKEND:
+            return True
         if backend == GEMINI_BACKEND:
             return self._has_key(config.GEMINI_API_KEY)
         if backend == HF_BACKEND:
@@ -180,6 +183,8 @@ class LocalStream:
     @staticmethod
     def _requirement_name(backend: str) -> str:
         """Return the env var users need for a backend, if any."""
+        if backend == REMOTE_BACKEND:
+            return "CONVERSATION_SERVICE_URL"
         if backend == GEMINI_BACKEND:
             return "GEMINI_API_KEY"
         if backend == HF_BACKEND:
@@ -581,6 +586,8 @@ class LocalStream:
                     )
             except Exception:
                 pass
+            if hasattr(self.handler, "set_barge_in_callback"):
+                self.handler.set_barge_in_callback(self.clear_audio_queue)
             self._tasks = [
                 asyncio.create_task(self.handler.start_up(), name="openai-handler"),
                 asyncio.create_task(self.record_loop(), name="stream-record-loop"),
@@ -649,17 +656,26 @@ class LocalStream:
                 audio.clear_output_buffer()
             elif hasattr(audio, "clear_player") and callable(audio.clear_player):
                 audio.clear_player()
-        self.handler.output_queue = asyncio.Queue()
+        if hasattr(self.handler, "clear_output_queue"):
+            self.handler.clear_output_queue()
 
     async def record_loop(self) -> None:
         """Read mic frames from the recorder and forward them to the handler."""
         input_sample_rate = self._robot.media.get_input_audio_samplerate()
-        logger.debug(f"Audio recording started at {input_sample_rate} Hz")
+        logger.info(f"Audio recording started at {input_sample_rate} Hz")
+        last_wait_log = time.monotonic()
+        first_frame_seen = False
 
         while not self._stop_event.is_set():
             audio_frame = self._robot.media.get_audio_sample()
             if audio_frame is not None:
+                if not first_frame_seen:
+                    first_frame_seen = True
+                    logger.info("Audio recording received first microphone frame")
                 await self.handler.receive((input_sample_rate, audio_frame))
+            elif time.monotonic() - last_wait_log >= 5:
+                logger.info("Audio recording is waiting for microphone frames")
+                last_wait_log = time.monotonic()
             await asyncio.sleep(0)  # avoid busy loop
 
     async def play_loop(self) -> None:
@@ -712,6 +728,8 @@ class LocalStream:
                     playback_delay_s = _estimate_pending_playback_seconds(self._robot)
                     head_wobbler.feed_pcm(audio_data.reshape(1, -1), input_sample_rate, start_delay_s=playback_delay_s)
 
+                if hasattr(self.handler, "note_playback_audio"):
+                    self.handler.note_playback_audio(output_sample_rate, len(audio_frame))
                 self._robot.media.push_audio_sample(audio_frame)
 
             else:

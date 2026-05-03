@@ -1,6 +1,7 @@
 import logging
 from typing import Any, Dict, Tuple, Literal
 
+import numpy as np
 from reachy_mini.utils import create_head_pose
 from reachy_mini_conversation_app.tools.core_tools import Tool, ToolDependencies
 from reachy_mini_conversation_app.dance_emotion_moves import GotoQueueMove
@@ -36,6 +37,28 @@ class MoveHead(Tool):
         "front": (0, 0, 0, 0, 0, 0),
     }
 
+    def _get_start_pose(self, deps: ToolDependencies) -> tuple[Any, tuple[float, float], float]:
+        """Use cached command state first to avoid extra motor bus reads."""
+        movement_manager = deps.movement_manager
+        try:
+            status = movement_manager.get_status()
+            last_pose = status.get("last_commanded_pose", {})
+            head = last_pose.get("head")
+            antennas = last_pose.get("antennas")
+            body_yaw = last_pose.get("body_yaw", 0.0)
+            if head is not None and antennas is not None:
+                return (
+                    np.array(head, dtype=np.float32),
+                    (float(antennas[0]), float(antennas[1])),
+                    float(body_yaw or 0.0),
+                )
+        except Exception as exc:
+            logger.debug("Could not use cached movement pose: %s", exc)
+
+        current_head_pose = deps.reachy_mini.get_current_head_pose()
+        _, current_antennas = deps.reachy_mini.get_current_joint_positions()
+        return current_head_pose, (float(current_antennas[0]), float(current_antennas[1])), float(current_antennas[0])
+
     async def __call__(self, deps: ToolDependencies, **kwargs: Any) -> Dict[str, Any]:
         """Move head in a given direction."""
         direction_raw = kwargs.get("direction")
@@ -51,9 +74,7 @@ class MoveHead(Tool):
         try:
             movement_manager = deps.movement_manager
 
-            # Get current state for interpolation
-            current_head_pose = deps.reachy_mini.get_current_head_pose()
-            _, current_antennas = deps.reachy_mini.get_current_joint_positions()
+            current_head_pose, current_antennas, current_body_yaw = self._get_start_pose(deps)
 
             # Create goto move
             goto_move = GotoQueueMove(
@@ -65,7 +86,7 @@ class MoveHead(Tool):
                     current_antennas[1],
                 ),  # Skip body_yaw
                 target_body_yaw=0,  # Reset body yaw
-                start_body_yaw=current_antennas[0],  # body_yaw is first in joint positions
+                start_body_yaw=current_body_yaw,
                 duration=deps.motion_duration_s,
             )
 

@@ -35,6 +35,28 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+glm_chat = [
+  "faster-whisper>=1.0.0",
+  "edge-tts>=6.1.0",
+]
+funasr_pipeline = [
+  "funasr>=1.1.0",
+  "modelscope>=1.9.0",
+  "torch>=2.1",
+  "torchaudio>=2.1",
+]
+inference_server = [
+  "edge-tts>=6.1.0",
+  "funasr>=1.1.0",
+  "modelscope>=1.9.0",
+  "torch>=2.1",
+  "torchaudio>=2.1",
+  "fastapi>=0.110.0",
+  "uvicorn[standard]>=0.29.0",
+]
+# remote_client: minimal deps for Reachy Mini Pi 4 when using BACKEND_PROVIDER=remote.
+# httpx is already a core dependency, so no extras are needed beyond the base install.
+remote_client = []
 local_vision = [
   "accelerate>=1.13.0",
   "torch>=2.1",
@@ -73,6 +95,7 @@ dev = [
 
 [project.scripts]
 reachy-mini-conversation-app = "reachy_mini_conversation_app.main:main"
+reachy-mini-inference-server = "reachy_mini_conversation_app.inference_server:main"
 
 [tool.uv]
 dependency-metadata = [

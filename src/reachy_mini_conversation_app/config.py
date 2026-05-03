@@ -60,6 +60,46 @@ AVAILABLE_VOICES: list[str] = [
 ]
 OPENAI_DEFAULT_VOICE = "cedar"
 
+# Voices supported by GLM Realtime API
+GLM_AVAILABLE_VOICES: list[str] = [
+    "tongtong",
+    "xiaochen",
+    "female-tianmei",
+    "female-shaonv",
+    "male-qn-daxuesheng",
+    "male-qn-jingying",
+    "lovely_girl",
+]
+GLM_DEFAULT_VOICE = "tongtong"
+
+# Edge-TTS voices used by the GLM Chat text-pipeline backend (ASR→LLM→TTS).
+# These are Microsoft Edge TTS voices; no API key required.
+# Full list: https://docs.microsoft.com/zh-cn/azure/cognitive-services/speech-service/language-support
+GLM_CHAT_AVAILABLE_VOICES: list[str] = [
+    "zh-CN-XiaoxiaoNeural",   # 中文女声（温柔）
+    "zh-CN-YunxiNeural",      # 中文男声
+    "zh-CN-XiaohanNeural",    # 中文女声（活泼）
+    "zh-CN-YunjianNeural",    # 中文男声（运动）
+    "zh-CN-YunyangNeural",    # 中文男声（新闻）
+    "zh-HK-HiuGaaiNeural",   # 粤语女声
+    "en-US-AriaNeural",       # 英文女声
+    "en-US-GuyNeural",        # 英文男声
+]
+GLM_CHAT_DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
+
+# CosyVoice2 preset speakers used by the funasr_pipeline backend.
+# Full list: https://github.com/FunAudioLLM/CosyVoice
+COSYVOICE_AVAILABLE_VOICES: list[str] = [
+    "中文女",
+    "中文男",
+    "粤语女",
+    "英文女",
+    "英文男",
+    "日语男",
+    "韩语女",
+]
+COSYVOICE_DEFAULT_VOICE = "中文女"
+
 # Qwen3-TTS CustomVoice speaker catalog from the deployed Hugging Face backend.
 HF_AVAILABLE_VOICES: list[str] = [
     "Aiden",
@@ -88,7 +128,22 @@ GEMINI_AVAILABLE_VOICES: list[str] = [
 OPENAI_BACKEND = "openai"
 GEMINI_BACKEND = "gemini"
 HF_BACKEND = "huggingface"
+GLM_BACKEND = "glm"
+GLM_CHAT_BACKEND = "glm_chat"
+FUNASR_PIPELINE_BACKEND = "funasr_pipeline"
+# Remote backend: Pi 4 sends audio to Mac inference server, receives audio back.
+# Set CONVERSATION_SERVICE_URL on the Pi 4 to point at the Mac.
+REMOTE_BACKEND = "remote"
 DEFAULT_BACKEND_PROVIDER = HF_BACKEND
+
+# Text-pipeline LLM providers (used by glm_chat, funasr_pipeline and remote backends)
+QWEN_LLM_PROVIDER = "qwen"
+DEEPSEEK_LLM_PROVIDER = "deepseek"
+GLM_LLM_PROVIDER = "glm"
+# Local agent provider: any OpenAI-compatible local server (Ollama, LM Studio, vLLM, …).
+# Default target is Ollama at http://localhost:11434/v1.
+# Override the endpoint with HERMES_API_URL for other servers.
+HERMES_LLM_PROVIDER = "hermes"
 HF_REALTIME_CONNECTION_MODE_ENV = "HF_REALTIME_CONNECTION_MODE"
 HF_REALTIME_WS_URL_ENV = "HF_REALTIME_WS_URL"
 HF_LOCAL_CONNECTION_MODE = "local"
@@ -116,16 +171,28 @@ DEFAULT_MODEL_NAME_BY_BACKEND = {
     OPENAI_BACKEND: "gpt-realtime",
     GEMINI_BACKEND: "gemini-3.1-flash-live-preview",
     HF_BACKEND: HF_DEFAULTS.model_name,
+    GLM_BACKEND: "glm-realtime",
+    GLM_CHAT_BACKEND: "glm-4.7",
+    FUNASR_PIPELINE_BACKEND: "qwen-turbo",
+    REMOTE_BACKEND: "",
 }
 BACKEND_LABEL_BY_PROVIDER = {
     OPENAI_BACKEND: "OpenAI Realtime",
     GEMINI_BACKEND: "Gemini Live",
     HF_BACKEND: "Hugging Face",
+    GLM_BACKEND: "GLM Realtime",
+    GLM_CHAT_BACKEND: "GLM Chat (ASR+TTS)",
+    FUNASR_PIPELINE_BACKEND: "FunASR + Qwen/DeepSeek + CosyVoice",
+    REMOTE_BACKEND: "Remote Inference (Mac server)",
 }
 DEFAULT_VOICE_BY_BACKEND = {
     OPENAI_BACKEND: OPENAI_DEFAULT_VOICE,
     GEMINI_BACKEND: "Kore",
     HF_BACKEND: HF_DEFAULTS.voice,
+    GLM_BACKEND: GLM_DEFAULT_VOICE,
+    GLM_CHAT_BACKEND: GLM_CHAT_DEFAULT_VOICE,
+    FUNASR_PIPELINE_BACKEND: COSYVOICE_DEFAULT_VOICE,
+    REMOTE_BACKEND: COSYVOICE_DEFAULT_VOICE,
 }
 
 logger = logging.getLogger(__name__)
@@ -135,6 +202,25 @@ def _is_gemini_model_name(model_name: str | None) -> bool:
     """Return True when the provided model name targets Gemini."""
     candidate = (model_name or "").strip().lower()
     return candidate.startswith("gemini")
+
+
+def _is_glm_model_name(model_name: str | None) -> bool:
+    """Return True when the provided model name targets GLM Realtime."""
+    candidate = (model_name or "").strip().lower()
+    return candidate.startswith("glm-realtime")
+
+
+def _is_glm_chat_model_name(model_name: str | None) -> bool:
+    """Return True when the provided model name targets GLM Chat (text pipeline)."""
+    candidate = (model_name or "").strip().lower()
+    # glm-4.x family but NOT glm-realtime
+    return candidate.startswith("glm-") and not candidate.startswith("glm-realtime")
+
+
+def _is_qwen_or_deepseek_model_name(model_name: str | None) -> bool:
+    """Return True when the model name targets Qwen or DeepSeek (funasr_pipeline)."""
+    candidate = (model_name or "").strip().lower()
+    return candidate.startswith("qwen") or candidate.startswith("deepseek")
 
 
 def _normalize_backend_provider(
@@ -148,7 +234,15 @@ def _normalize_backend_provider(
     if candidate:
         expected = ", ".join(sorted(DEFAULT_MODEL_NAME_BY_BACKEND))
         raise ValueError(f"Invalid BACKEND_PROVIDER={backend_provider!r}. Expected one of: {expected}.")
-    return GEMINI_BACKEND if _is_gemini_model_name(model_name) else DEFAULT_BACKEND_PROVIDER
+    if _is_gemini_model_name(model_name):
+        return GEMINI_BACKEND
+    if _is_glm_model_name(model_name):
+        return GLM_BACKEND
+    if _is_glm_chat_model_name(model_name):
+        return GLM_CHAT_BACKEND
+    if _is_qwen_or_deepseek_model_name(model_name):
+        return FUNASR_PIPELINE_BACKEND
+    return DEFAULT_BACKEND_PROVIDER
 
 
 def _resolve_model_name(
@@ -162,10 +256,19 @@ def _resolve_model_name(
 
     candidate = (model_name or "").strip()
     if candidate:
-        if normalized_backend == GEMINI_BACKEND and _is_gemini_model_name(candidate):
-            return candidate
-        if normalized_backend != GEMINI_BACKEND and not _is_gemini_model_name(candidate):
-            return candidate
+        backend_model_check = {
+            GEMINI_BACKEND: _is_gemini_model_name,
+            GLM_BACKEND: _is_glm_model_name,
+            GLM_CHAT_BACKEND: _is_glm_chat_model_name,
+            FUNASR_PIPELINE_BACKEND: _is_qwen_or_deepseek_model_name,
+        }
+        checker = backend_model_check.get(normalized_backend)
+        if checker is not None:
+            if checker(candidate):
+                return candidate
+        else:
+            if not _is_gemini_model_name(candidate) and not _is_glm_model_name(candidate):
+                return candidate
         logger.warning(
             "MODEL_NAME=%r does not match BACKEND_PROVIDER=%r, using default %r",
             candidate,
@@ -350,6 +453,41 @@ class Config:
     # Required (one of these depending on BACKEND_PROVIDER)
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # The key is downloaded in console.py if needed
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    GLM_API_KEY = os.getenv("GLM_API_KEY") or os.getenv("ZHIPUAI_API_KEY")
+    QWEN_API_KEY = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+
+    # funasr_pipeline specific settings
+    # Which LLM to call: "qwen" or "deepseek"
+    TEXT_LLM_PROVIDER = os.getenv("TEXT_LLM_PROVIDER", QWEN_LLM_PROVIDER)
+    # FunASR model ID (downloaded automatically on first run)
+    FUNASR_MODEL = os.getenv("FUNASR_MODEL", "iic/SenseVoiceSmall")
+    # Path to a locally downloaded CosyVoice2 model directory
+    COSYVOICE_MODEL_DIR = os.getenv("COSYVOICE_MODEL_DIR", "pretrained_models/CosyVoice2-0.5B")
+    # Mac inference server TTS provider: "cosyvoice" (local) or "edge" (online, faster/more natural).
+    INFERENCE_TTS_PROVIDER = os.getenv("INFERENCE_TTS_PROVIDER", "cosyvoice")
+    EDGE_TTS_VOICE = os.getenv("EDGE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
+    REACHY_ACTION_PLANNER_ENABLED = _env_flag("REACHY_ACTION_PLANNER_ENABLED", True)
+    REACHY_ACTION_PLANNER_TIMEOUT = float(os.getenv("REACHY_ACTION_PLANNER_TIMEOUT", "0.8"))
+
+    # Local agent (hermes provider): Ollama or any OpenAI-compatible local server.
+    # Override with HERMES_API_URL if not using the default Ollama port.
+    HERMES_API_URL = os.getenv("HERMES_API_URL", "http://localhost:11434/v1")
+
+    # Remote backend: unified conversation service URL (Mac inference server).
+    # Pi 4 sends audio here and receives synthesised audio back; all AI runs on Mac.
+    # Set BACKEND_PROVIDER=remote and point this at the Mac server's /conversation endpoint.
+    CONVERSATION_SERVICE_URL = os.getenv("CONVERSATION_SERVICE_URL")  # e.g. http://mac-ip:8765/conversation
+
+    # Remote inference service URLs (used by funasr_pipeline when running on Pi 4).
+    # When set, the pipeline calls these HTTP endpoints instead of loading local models.
+    # Run `reachy-mini-inference-server` on the Mac to start both services.
+    FUNASR_SERVICE_URL = os.getenv("FUNASR_SERVICE_URL")   # e.g. http://mac-ip:8765/asr
+    TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL")         # e.g. http://mac-ip:8765/tts
+
+    # inference_server.py listen settings (used on the Mac server side)
+    INFERENCE_SERVER_HOST = os.getenv("INFERENCE_SERVER_HOST", "0.0.0.0")
+    INFERENCE_SERVER_PORT = int(os.getenv("INFERENCE_SERVER_PORT", "8765"))
 
     # Optional
     BACKEND_PROVIDER = _normalize_backend_provider(
@@ -455,6 +593,22 @@ def refresh_runtime_config_from_env() -> None:
     """Refresh mutable runtime config fields from the current environment."""
     config.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     config.GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    config.GLM_API_KEY = os.getenv("GLM_API_KEY") or os.getenv("ZHIPUAI_API_KEY")
+    config.QWEN_API_KEY = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+    config.DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+    config.TEXT_LLM_PROVIDER = os.getenv("TEXT_LLM_PROVIDER", QWEN_LLM_PROVIDER)
+    config.FUNASR_MODEL = os.getenv("FUNASR_MODEL", "iic/SenseVoiceSmall")
+    config.COSYVOICE_MODEL_DIR = os.getenv("COSYVOICE_MODEL_DIR", "pretrained_models/CosyVoice2-0.5B")
+    config.INFERENCE_TTS_PROVIDER = os.getenv("INFERENCE_TTS_PROVIDER", "cosyvoice")
+    config.EDGE_TTS_VOICE = os.getenv("EDGE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
+    config.REACHY_ACTION_PLANNER_ENABLED = _env_flag("REACHY_ACTION_PLANNER_ENABLED", True)
+    config.REACHY_ACTION_PLANNER_TIMEOUT = float(os.getenv("REACHY_ACTION_PLANNER_TIMEOUT", "0.8"))
+    config.HERMES_API_URL = os.getenv("HERMES_API_URL", "http://localhost:11434/v1")
+    config.CONVERSATION_SERVICE_URL = os.getenv("CONVERSATION_SERVICE_URL")
+    config.FUNASR_SERVICE_URL = os.getenv("FUNASR_SERVICE_URL")
+    config.TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL")
+    config.INFERENCE_SERVER_HOST = os.getenv("INFERENCE_SERVER_HOST", "0.0.0.0")
+    config.INFERENCE_SERVER_PORT = int(os.getenv("INFERENCE_SERVER_PORT", "8765"))
     config.BACKEND_PROVIDER = _normalize_backend_provider(
         os.getenv("BACKEND_PROVIDER"),
         os.getenv("MODEL_NAME"),
@@ -497,6 +651,12 @@ def get_available_voices_for_backend(backend: str | None = None) -> list[str]:
         return list(GEMINI_AVAILABLE_VOICES)
     if normalized_backend == HF_BACKEND:
         return list(HF_AVAILABLE_VOICES)
+    if normalized_backend == GLM_BACKEND:
+        return list(GLM_AVAILABLE_VOICES)
+    if normalized_backend == GLM_CHAT_BACKEND:
+        return list(GLM_CHAT_AVAILABLE_VOICES)
+    if normalized_backend in {FUNASR_PIPELINE_BACKEND, REMOTE_BACKEND}:
+        return list(COSYVOICE_AVAILABLE_VOICES)
     return list(AVAILABLE_VOICES)
 
 
@@ -544,6 +704,26 @@ def has_hf_realtime_target() -> bool:
 def is_gemini_model() -> bool:
     """Return True if the configured MODEL_NAME is a Gemini Live model."""
     return get_backend_choice() == GEMINI_BACKEND
+
+
+def is_glm_model() -> bool:
+    """Return True if the configured backend is GLM Realtime."""
+    return get_backend_choice() == GLM_BACKEND
+
+
+def is_glm_chat_model() -> bool:
+    """Return True if the configured backend is GLM Chat text pipeline."""
+    return get_backend_choice() == GLM_CHAT_BACKEND
+
+
+def is_funasr_pipeline_model() -> bool:
+    """Return True if the configured backend is the FunASR + Qwen/DeepSeek + CosyVoice pipeline."""
+    return get_backend_choice() == FUNASR_PIPELINE_BACKEND
+
+
+def is_remote_backend() -> bool:
+    """Return True if the configured backend delegates all AI to the Mac inference server."""
+    return get_backend_choice() == REMOTE_BACKEND
 
 
 def set_custom_profile(profile: str | None) -> None:
