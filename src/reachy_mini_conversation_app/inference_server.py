@@ -1030,6 +1030,54 @@ def _infer_reachy_actions_from_user_text(text: str) -> list[dict[str, object]]:
     return actions[:4]
 
 
+def _may_be_reachy_action_request(text: str) -> bool:
+    """Return whether a turn is worth sending to the slower action planners."""
+    normalized = re.sub(r"\s+", "", text.lower())
+    action_keywords = (
+        "跳舞",
+        "舞蹈",
+        "表演",
+        "扭",
+        "动一动",
+        "动作",
+        "停下",
+        "停止",
+        "别动",
+        "不要动",
+        "看左",
+        "向左",
+        "左边",
+        "看右",
+        "向右",
+        "右边",
+        "抬头",
+        "低头",
+        "回正",
+        "看着我",
+        "看我",
+        "笑",
+        "开心",
+        "高兴",
+        "卖萌",
+        "表情",
+        "情绪",
+        "头部追踪",
+        "跟踪",
+        "dance",
+        "move",
+        "turn",
+        "look",
+        "left",
+        "right",
+        "smile",
+        "laugh",
+        "happy",
+        "emotion",
+        "stop",
+    )
+    return any(keyword in normalized for keyword in action_keywords)
+
+
 def _fast_action_reply(user_text: str, actions: list[dict[str, object]]) -> str | None:
     """Return a short local reply for clear action-only commands."""
     if not config.FAST_ACTION_REPLY_ENABLED or not actions:
@@ -1237,11 +1285,12 @@ async def _build_conversation_audio_stream(
     reachy_actions = _infer_reachy_actions_from_user_text(user_text)
     if reachy_actions:
         action_source = "heuristic"
-    if not reachy_actions:
+    should_try_action_planners = not reachy_actions and _may_be_reachy_action_request(user_text)
+    if not reachy_actions and should_try_action_planners:
         reachy_actions = await _plan_reachy_actions_with_agent_tools(user_text)
         if reachy_actions:
             action_source = "agent_tools"
-    if not reachy_actions:
+    if not reachy_actions and should_try_action_planners:
         reachy_actions = await _plan_reachy_actions_with_llm(user_text)
         if reachy_actions:
             action_source = "planner"
