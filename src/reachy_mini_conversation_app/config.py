@@ -140,10 +140,10 @@ DEFAULT_BACKEND_PROVIDER = HF_BACKEND
 QWEN_LLM_PROVIDER = "qwen"
 DEEPSEEK_LLM_PROVIDER = "deepseek"
 GLM_LLM_PROVIDER = "glm"
-# Local agent provider: any OpenAI-compatible local server (Ollama, LM Studio, vLLM, …).
+# OpenAI-compatible local agent/server provider (OpenClaw, Ollama, LM Studio, vLLM, …).
 # Default target is Ollama at http://localhost:11434/v1.
-# Override the endpoint with HERMES_API_URL for other servers.
-HERMES_LLM_PROVIDER = "hermes"
+# Override the endpoint with OPENAI_COMPAT_API_URL for other servers.
+OPENAI_COMPAT_LLM_PROVIDER = "openai_compat"
 HF_REALTIME_CONNECTION_MODE_ENV = "HF_REALTIME_CONNECTION_MODE"
 HF_REALTIME_WS_URL_ENV = "HF_REALTIME_WS_URL"
 HF_LOCAL_CONNECTION_MODE = "local"
@@ -460,6 +460,7 @@ class Config:
     # funasr_pipeline specific settings
     # Which LLM to call: "qwen" or "deepseek"
     TEXT_LLM_PROVIDER = os.getenv("TEXT_LLM_PROVIDER", QWEN_LLM_PROVIDER)
+    TEXT_LLM_MODEL = os.getenv("TEXT_LLM_MODEL") or os.getenv("MODEL_NAME")
     # FunASR model ID (downloaded automatically on first run)
     FUNASR_MODEL = os.getenv("FUNASR_MODEL", "iic/SenseVoiceSmall")
     # Path to a locally downloaded CosyVoice2 model directory
@@ -470,14 +471,18 @@ class Config:
     REACHY_ACTION_PLANNER_ENABLED = _env_flag("REACHY_ACTION_PLANNER_ENABLED", True)
     REACHY_ACTION_PLANNER_TIMEOUT = float(os.getenv("REACHY_ACTION_PLANNER_TIMEOUT", "0.8"))
 
-    # Local agent (hermes provider): Ollama or any OpenAI-compatible local server.
-    # Override with HERMES_API_URL if not using the default Ollama port.
-    HERMES_API_URL = os.getenv("HERMES_API_URL", "http://localhost:11434/v1")
+    # OpenAI-compatible local agent/server: OpenClaw, Ollama, LM Studio, vLLM, etc.
+    OPENAI_COMPAT_API_URL = os.getenv("OPENAI_COMPAT_API_URL", "http://localhost:11434/v1")
+    OPENAI_COMPAT_API_KEY = os.getenv("OPENAI_COMPAT_API_KEY", "ollama")
 
     # Remote backend: unified conversation service URL (Mac inference server).
     # Pi 4 sends audio here and receives synthesised audio back; all AI runs on Mac.
     # Set BACKEND_PROVIDER=remote and point this at the Mac server's /conversation endpoint.
     CONVERSATION_SERVICE_URL = os.getenv("CONVERSATION_SERVICE_URL")  # e.g. http://mac-ip:8765/conversation
+    # Long-lived audio stream endpoint. When unset, the Pi derives it from
+    # CONVERSATION_SERVICE_URL as ws://<mac-ip>:8765/conversation/ws.
+    CONVERSATION_STREAM_URL = os.getenv("CONVERSATION_STREAM_URL")
+    REMOTE_AUDIO_STREAMING = _env_flag("REMOTE_AUDIO_STREAMING", True)
 
     # Remote inference service URLs (used by funasr_pipeline when running on Pi 4).
     # When set, the pipeline calls these HTTP endpoints instead of loading local models.
@@ -597,14 +602,18 @@ def refresh_runtime_config_from_env() -> None:
     config.QWEN_API_KEY = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
     config.DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
     config.TEXT_LLM_PROVIDER = os.getenv("TEXT_LLM_PROVIDER", QWEN_LLM_PROVIDER)
+    config.TEXT_LLM_MODEL = os.getenv("TEXT_LLM_MODEL") or os.getenv("MODEL_NAME")
     config.FUNASR_MODEL = os.getenv("FUNASR_MODEL", "iic/SenseVoiceSmall")
     config.COSYVOICE_MODEL_DIR = os.getenv("COSYVOICE_MODEL_DIR", "pretrained_models/CosyVoice2-0.5B")
     config.INFERENCE_TTS_PROVIDER = os.getenv("INFERENCE_TTS_PROVIDER", "cosyvoice")
     config.EDGE_TTS_VOICE = os.getenv("EDGE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
     config.REACHY_ACTION_PLANNER_ENABLED = _env_flag("REACHY_ACTION_PLANNER_ENABLED", True)
     config.REACHY_ACTION_PLANNER_TIMEOUT = float(os.getenv("REACHY_ACTION_PLANNER_TIMEOUT", "0.8"))
-    config.HERMES_API_URL = os.getenv("HERMES_API_URL", "http://localhost:11434/v1")
+    config.OPENAI_COMPAT_API_URL = os.getenv("OPENAI_COMPAT_API_URL", "http://localhost:11434/v1")
+    config.OPENAI_COMPAT_API_KEY = os.getenv("OPENAI_COMPAT_API_KEY", "ollama")
     config.CONVERSATION_SERVICE_URL = os.getenv("CONVERSATION_SERVICE_URL")
+    config.CONVERSATION_STREAM_URL = os.getenv("CONVERSATION_STREAM_URL")
+    config.REMOTE_AUDIO_STREAMING = _env_flag("REMOTE_AUDIO_STREAMING", True)
     config.FUNASR_SERVICE_URL = os.getenv("FUNASR_SERVICE_URL")
     config.TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL")
     config.INFERENCE_SERVER_HOST = os.getenv("INFERENCE_SERVER_HOST", "0.0.0.0")

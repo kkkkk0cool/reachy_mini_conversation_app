@@ -1,16 +1,18 @@
 """Remote conversation handler for Reachy Mini (Pi 4).
 
 Delegates the entire ASR → LLM → TTS pipeline to the Mac inference server.
-The Pi 4 only performs energy-based VAD, sends audio over WiFi, and plays
-back the returned PCM audio.  No local ML models are required.
+By default the Pi 4 streams microphone frames over WebSocket so the Mac owns
+VAD/turn detection, then plays back the returned PCM audio.  No local ML models
+are required.
 
 Architecture
 ------------
     Pi 4 (this handler)               Mac M4 Pro (inference_server.py)
     ┌────────────────────┐            ┌──────────────────────────────┐
     │  Mic  (16 kHz PCM) │            │                              │
-    │  Energy-based VAD  │            │  POST /conversation          │
-    │  Speech buffer     │──WiFi──▶  │    ↓ FunASR (ASR)            │
+    │  Audio streamer    │──WiFi──▶  │  WS /conversation/ws         │
+    │                    │            │    ↓ Server-side VAD         │
+    │                    │            │    ↓ FunASR (ASR)            │
     │                    │            │    ↓ Qwen/DeepSeek (LLM)     │
     │                    │◀──audio── │    ↓ CosyVoice2 (TTS)        │
     │  Speaker playback  │            └──────────────────────────────┘
@@ -24,6 +26,7 @@ Setup
     # On Pi 4: add to .env
     BACKEND_PROVIDER=remote
     CONVERSATION_SERVICE_URL=http://<mac-ip>:8765/conversation
+    # Optional: CONVERSATION_STREAM_URL=ws://<mac-ip>:8765/conversation/ws
     # Optional CosyVoice voice (default: 中文女)
     # VOICE=中文女
 """
@@ -34,10 +37,11 @@ import json
 import logging
 import time
 from typing import Optional, Tuple
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 import httpx
 import numpy as np
+import websockets
 from fastrtc import AdditionalOutputs, wait_for_item, audio_to_int16
 from numpy.typing import NDArray
 
@@ -88,7 +92,10 @@ _ALLOWED_REMOTE_ACTIONS = {
 
 _HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=30.0, pool=5.0)
 _STREAM_CHUNK_SIZE = 4_096  # bytes per httpx read iteration
+_STREAM_AUDIO_QUEUE_MAX = 64
+_STREAM_RECONNECT_SECONDS = 1.5
 _REMOTE_ACTION_TIMEOUT = 3.0
+_REMOTE_CALL_TIMEOUT = 45.0
 _IMMEDIATE_REMOTE_ACTIONS = {"stop_dance", "stop_emotion", "do_nothing"}
 
 
@@ -101,8 +108,24 @@ def _to_mono_int16(audio: NDArray) -> NDArray[np.int16]:
     return audio_to_int16(audio)
 
 
+def _derive_stream_url(conversation_url: str) -> str:
+    """Derive ws://host/conversation/ws from http://host/conversation."""
+    explicit = (getattr(config, "CONVERSATION_STREAM_URL", None) or "").strip()
+    if explicit:
+        return explicit
+
+    parsed = urlsplit(conversation_url)
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    path = parsed.path.rstrip("/")
+    if path.endswith("/conversation"):
+        path = f"{path}/ws"
+    else:
+        path = f"{path}/conversation/ws"
+    return urlunsplit((scheme, parsed.netloc, path, "", ""))
+
+
 class RemoteConversationHandler(ConversationHandler):
-    """Minimal Pi 4 handler: VAD → POST /conversation → stream audio back.
+    """Minimal Pi 4 handler: stream audio → receive streamed audio back.
 
     All intelligence (ASR, LLM, TTS) runs on the Mac inference server.
     This handler has no local ML dependencies beyond ``httpx`` and ``numpy``.
@@ -115,7 +138,7 @@ class RemoteConversationHandler(ConversationHandler):
         instance_path: Optional[str] = None,
         startup_voice: Optional[str] = None,
     ) -> None:
-        """Initialise with lightweight VAD state only."""
+        """Initialise with lightweight audio streaming and HTTP fallback state."""
         super().__init__(
             expected_layout="mono",
             output_sample_rate=_OUTPUT_SAMPLE_RATE,
@@ -147,6 +170,16 @@ class RemoteConversationHandler(ConversationHandler):
         self._session_id: Optional[str] = None
         self._http_client: Optional[httpx.AsyncClient] = None
         self._remote_task: Optional[asyncio.Task[None]] = None
+
+        # Streaming remote session. In this mode Reachy sends continuous mic
+        # frames and the Mac server owns VAD/turn detection.
+        self._streaming_enabled = bool(getattr(config, "REMOTE_AUDIO_STREAMING", True))
+        self._stream_url: str = ""
+        self._stream_task: Optional[asyncio.Task[None]] = None
+        self._stream_audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=_STREAM_AUDIO_QUEUE_MAX)
+        self._stream_response_active = False
+        self._stream_connected = False
+        self._stream_output_sample_rate = _OUTPUT_SAMPLE_RATE
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -183,8 +216,22 @@ class RemoteConversationHandler(ConversationHandler):
         except Exception as exc:
             logger.warning("Could not reach inference server at %s: %s", health_url, exc)
 
+        if self._streaming_enabled:
+            self._stream_url = _derive_stream_url(url)
+            self._stream_task = asyncio.create_task(self._stream_loop(), name="remote-conversation-stream")
+            logger.info("Remote audio streaming enabled: %s", self._stream_url)
+        else:
+            logger.info("Remote audio streaming disabled; using POST /conversation mode.")
+
     async def shutdown(self) -> None:
         """Close the remote HTTP client and clear queued audio."""
+        if self._stream_task is not None and not self._stream_task.done():
+            self._stream_task.cancel()
+            try:
+                await self._stream_task
+            except asyncio.CancelledError:
+                pass
+
         if self._remote_task is not None and not self._remote_task.done():
             self._remote_task.cancel()
             try:
@@ -340,6 +387,11 @@ class RemoteConversationHandler(ConversationHandler):
         """Accept incoming microphone frames and run energy-based VAD."""
         _, audio = frame
         pcm = _to_mono_int16(audio)
+
+        if self._streaming_enabled:
+            await self._receive_streaming(pcm)
+            return
+
         rms = int(np.sqrt(np.mean(pcm.astype(np.float32) ** 2)))
         now = time.monotonic()
         playback_active = self._is_playback_active()
@@ -415,6 +467,153 @@ class RemoteConversationHandler(ConversationHandler):
         """Yield queued audio frames to FastRTC for playback."""
         return await wait_for_item(self.output_queue)
 
+    # ── Remote streaming ──────────────────────────────────────────────────────
+
+    async def _receive_streaming(self, pcm: NDArray[np.int16]) -> None:
+        """Queue microphone PCM for the Mac-owned VAD stream."""
+        now = time.monotonic()
+        if now < self._ignore_until:
+            return
+        if not self._stream_connected:
+            return
+
+        # Avoid feeding Reachy's own speaker output back into the server VAD.
+        # Barge-in support should use explicit server-side interruption + AEC later.
+        if self._stream_response_active or self._is_playback_active():
+            return
+
+        try:
+            self._stream_audio_queue.put_nowait(pcm.tobytes())
+        except asyncio.QueueFull:
+            try:
+                self._stream_audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                self._stream_audio_queue.put_nowait(pcm.tobytes())
+            except asyncio.QueueFull:
+                pass
+
+    async def _stream_loop(self) -> None:
+        """Maintain a long-lived websocket to the Mac inference server."""
+        while True:
+            if not self._stream_url:
+                await asyncio.sleep(_STREAM_RECONNECT_SECONDS)
+                continue
+            try:
+                async with websockets.connect(self._stream_url, max_size=None) as ws:
+                    self._stream_connected = True
+                    while not self._stream_audio_queue.empty():
+                        try:
+                            self._stream_audio_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                    logger.info("Remote conversation stream connected: %s", self._stream_url)
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "start",
+                                "session_id": self._session_id,
+                                "voice": self._voice,
+                                "sample_rate": _INPUT_SAMPLE_RATE,
+                            },
+                            ensure_ascii=True,
+                        )
+                    )
+                    sender = asyncio.create_task(self._stream_sender(ws), name="remote-stream-sender")
+                    receiver = asyncio.create_task(self._stream_receiver(ws), name="remote-stream-receiver")
+                    done, pending = await asyncio.wait(
+                        {sender, receiver},
+                        return_when=asyncio.FIRST_EXCEPTION,
+                    )
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    for task in done:
+                        if task.cancelled():
+                            continue
+                        exc = task.exception()
+                        if exc is not None:
+                            raise exc
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Remote conversation stream disconnected: %s", exc)
+                self._stream_connected = False
+                self._stream_response_active = False
+                await asyncio.sleep(_STREAM_RECONNECT_SECONDS)
+
+    async def _stream_sender(self, ws) -> None:
+        while True:
+            audio_bytes = await self._stream_audio_queue.get()
+            await ws.send(audio_bytes)
+
+    async def _stream_receiver(self, ws) -> None:
+        deferred_actions: list[dict[str, object]] = []
+        after_speech_actions: list[dict[str, object]] = []
+        deferred_actions_started = False
+
+        async for message in ws:
+            if isinstance(message, bytes):
+                if deferred_actions and not deferred_actions_started:
+                    deferred_actions_started = True
+                    logger.info("Starting deferred remote actions with first streamed audio chunk.")
+                    asyncio.create_task(
+                        self._execute_remote_action_items(deferred_actions, "speech-synced"),
+                        name="remote-reachy-actions-speech-synced",
+                    )
+                pcm_out = np.frombuffer(message, dtype=np.int16)
+                await self.output_queue.put((self._stream_output_sample_rate, pcm_out))
+                continue
+
+            try:
+                data = json.loads(message)
+            except json.JSONDecodeError:
+                logger.debug("Ignoring non-JSON stream message: %r", message[:120])
+                continue
+
+            msg_type = data.get("type")
+            if msg_type == "ready":
+                self._stream_output_sample_rate = int(data.get("sample_rate") or _OUTPUT_SAMPLE_RATE)
+                logger.info("Remote conversation stream ready at %d Hz", self._stream_output_sample_rate)
+            elif msg_type == "user_text":
+                self._session_id = data.get("session_id") or self._session_id
+                user_text = data.get("text") or ""
+                if user_text:
+                    logger.info("User said: %s", user_text)
+                actions = data.get("actions") or []
+                if isinstance(actions, list):
+                    valid_actions = self._decode_remote_actions(json.dumps(actions, ensure_ascii=True))
+                    immediate_actions, deferred_actions, after_speech_actions = self._split_remote_actions(valid_actions)
+                    deferred_actions_started = False
+                    if immediate_actions:
+                        asyncio.create_task(
+                            self._execute_remote_action_items(immediate_actions, "immediate"),
+                            name="remote-reachy-actions-immediate",
+                        )
+            elif msg_type == "audio_start":
+                self._stream_response_active = True
+                self._processing = True
+                self._stream_output_sample_rate = int(data.get("sample_rate") or self._stream_output_sample_rate)
+            elif msg_type == "audio_end":
+                self._session_id = data.get("session_id") or self._session_id
+                self._stream_response_active = False
+                self._processing = False
+                self._ignore_until = time.monotonic() + 0.2
+                if after_speech_actions:
+                    logger.info("Starting after-speech remote actions.")
+                    asyncio.create_task(
+                        self._execute_remote_action_items(after_speech_actions, "after-speech"),
+                        name="remote-reachy-actions-after-speech",
+                    )
+            elif msg_type == "ignored":
+                text = data.get("text")
+                logger.info("Remote stream ignored transcript: %r", text)
+            elif msg_type == "error":
+                self._stream_response_active = False
+                self._processing = False
+                logger.error("Remote stream error: %s", data.get("message"))
+
     # ── Remote call ───────────────────────────────────────────────────────────
 
     async def _call_remote(self, audio: NDArray[np.int16]) -> None:
@@ -438,85 +637,94 @@ class RemoteConversationHandler(ConversationHandler):
 
         client = self._http_client or httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
         pcm_bytes = audio.tobytes()
+        stream_finished = False
 
         try:
             logger.info("Remote conversation: POST %s (%d bytes)", url, len(pcm_bytes))
-            async with client.stream("POST", url, content=pcm_bytes, headers=headers) as resp:
-                logger.info("Remote conversation: response status=%d", resp.status_code)
-                if resp.status_code != 200:
-                    body = await resp.aread()
-                    logger.error("Server error %d: %s", resp.status_code, body[:200])
-                    return
+            async with asyncio.timeout(_REMOTE_CALL_TIMEOUT):
+                async with client.stream("POST", url, content=pcm_bytes, headers=headers) as resp:
+                    logger.info("Remote conversation: response status=%d", resp.status_code)
+                    if resp.status_code != 200:
+                        body = await resp.aread()
+                        logger.error("Server error %d: %s", resp.status_code, body[:200])
+                        return
 
-                self._session_id = resp.headers.get("X-Session-ID", self._session_id)
-                output_sample_rate = int(resp.headers.get("X-Sample-Rate", _OUTPUT_SAMPLE_RATE))
-                actions_header = resp.headers.get("X-Reachy-Actions", "")
-                deferred_actions: list[dict[str, object]] = []
-                after_speech_actions: list[dict[str, object]] = []
-                deferred_actions_started = False
-                if actions_header:
-                    logger.info("Received remote actions header: %s", unquote(actions_header))
-                    actions = self._decode_remote_actions(actions_header)
-                    immediate_actions, deferred_actions, after_speech_actions = self._split_remote_actions(actions)
-                    if immediate_actions:
-                        asyncio.create_task(
-                            self._execute_remote_action_items(immediate_actions, "immediate"),
-                            name="remote-reachy-actions-immediate",
-                        )
-                user_text = unquote(resp.headers.get("X-User-Text", ""))
-                if user_text:
-                    logger.info("User said: %s", user_text)
+                    self._session_id = resp.headers.get("X-Session-ID", self._session_id)
+                    output_sample_rate = int(resp.headers.get("X-Sample-Rate", _OUTPUT_SAMPLE_RATE))
+                    actions_header = resp.headers.get("X-Reachy-Actions", "")
+                    deferred_actions: list[dict[str, object]] = []
+                    after_speech_actions: list[dict[str, object]] = []
+                    deferred_actions_started = False
+                    if actions_header:
+                        logger.info("Received remote actions header: %s", unquote(actions_header))
+                        actions = self._decode_remote_actions(actions_header)
+                        immediate_actions, deferred_actions, after_speech_actions = self._split_remote_actions(actions)
+                        if immediate_actions:
+                            asyncio.create_task(
+                                self._execute_remote_action_items(immediate_actions, "immediate"),
+                                name="remote-reachy-actions-immediate",
+                            )
+                    user_text = unquote(resp.headers.get("X-User-Text", ""))
+                    if user_text:
+                        logger.info("User said: %s", user_text)
 
-                buf = b""
-                async for chunk in resp.aiter_bytes(_STREAM_CHUNK_SIZE):
-                    buf += chunk
-                    # Emit complete int16 samples (2 bytes each)
-                    usable = len(buf) - (len(buf) % 2)
-                    if usable > 0:
+                    buf = b""
+                    async for chunk in resp.aiter_bytes(_STREAM_CHUNK_SIZE):
+                        buf += chunk
+                        # Emit complete int16 samples (2 bytes each)
+                        usable = len(buf) - (len(buf) % 2)
+                        if usable > 0:
+                            pcm_out = np.frombuffer(buf[:usable], dtype=np.int16)
+                            if deferred_actions and not deferred_actions_started:
+                                deferred_actions_started = True
+                                logger.info("Starting deferred remote actions with first audio chunk.")
+                                asyncio.create_task(
+                                    self._execute_remote_action_items(deferred_actions, "speech-synced"),
+                                    name="remote-reachy-actions-speech-synced",
+                                )
+                            await self.output_queue.put((output_sample_rate, pcm_out))
+                            buf = buf[usable:]
+                    stream_finished = True
+                    logger.info("Remote conversation: audio stream finished")
+                    self._ignore_until = time.monotonic() + 0.2
+
+                    # Flush any remaining bytes
+                    if len(buf) >= 2:
+                        usable = len(buf) - (len(buf) % 2)
                         pcm_out = np.frombuffer(buf[:usable], dtype=np.int16)
                         if deferred_actions and not deferred_actions_started:
                             deferred_actions_started = True
-                            logger.info("Starting deferred remote actions with first audio chunk.")
+                            logger.info("Starting deferred remote actions with final audio chunk.")
                             asyncio.create_task(
                                 self._execute_remote_action_items(deferred_actions, "speech-synced"),
                                 name="remote-reachy-actions-speech-synced",
                             )
                         await self.output_queue.put((output_sample_rate, pcm_out))
-                        buf = buf[usable:]
-                logger.info("Remote conversation: audio stream finished")
-                self._ignore_until = time.monotonic() + 0.2
-
-                # Flush any remaining bytes
-                if len(buf) >= 2:
-                    usable = len(buf) - (len(buf) % 2)
-                    pcm_out = np.frombuffer(buf[:usable], dtype=np.int16)
-                    if deferred_actions and not deferred_actions_started:
-                        deferred_actions_started = True
-                        logger.info("Starting deferred remote actions with final audio chunk.")
+                    elif deferred_actions and not deferred_actions_started:
+                        logger.info("Starting deferred remote actions after empty audio response.")
                         asyncio.create_task(
                             self._execute_remote_action_items(deferred_actions, "speech-synced"),
                             name="remote-reachy-actions-speech-synced",
                         )
-                    await self.output_queue.put((output_sample_rate, pcm_out))
-                elif deferred_actions and not deferred_actions_started:
-                    logger.info("Starting deferred remote actions after empty audio response.")
-                    asyncio.create_task(
-                        self._execute_remote_action_items(deferred_actions, "speech-synced"),
-                        name="remote-reachy-actions-speech-synced",
-                    )
-                if after_speech_actions:
-                    logger.info("Starting after-speech remote actions.")
-                    asyncio.create_task(
-                        self._execute_remote_action_items(after_speech_actions, "after-speech"),
-                        name="remote-reachy-actions-after-speech",
-                    )
+                    if after_speech_actions:
+                        logger.info("Starting after-speech remote actions.")
+                        asyncio.create_task(
+                            self._execute_remote_action_items(after_speech_actions, "after-speech"),
+                            name="remote-reachy-actions-after-speech",
+                        )
 
         except asyncio.CancelledError:
             logger.info("Remote conversation: cancelled")
             raise
+        except TimeoutError:
+            logger.error("Remote conversation timed out after %.1fs", _REMOTE_CALL_TIMEOUT)
         except Exception as exc:
             logger.error("Remote conversation error: %s", exc)
         finally:
+            if not stream_finished:
+                self.clear_output_queue()
+                self._playback_until = 0.0
+                self._ignore_until = time.monotonic() + 0.2
             self._processing = False
 
     # ── Gradio personality controls ────────────────────────────────────────────

@@ -75,14 +75,16 @@ import asyncio
 import logging
 import argparse
 from pathlib import Path
+from collections import deque
 from typing import Any, AsyncIterator, Optional
 from urllib.parse import quote, unquote
 
 import numpy as np
 import uvicorn
 import av
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, JSONResponse
+from numpy.typing import NDArray
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
@@ -92,7 +94,7 @@ from reachy_mini_conversation_app.config import (
     QWEN_LLM_PROVIDER,
     DEEPSEEK_LLM_PROVIDER,
     GLM_LLM_PROVIDER,
-    HERMES_LLM_PROVIDER,
+    OPENAI_COMPAT_LLM_PROVIDER,
     config,
 )
 
@@ -102,10 +104,19 @@ logger = logging.getLogger(__name__)
 # Strip SenseVoice emotion/language tags: <|HAPPY|>, <|zh|>, …
 _TAG_PATTERN = re.compile(r"<\|[^|]+\|>")
 _MEANINGFUL_TEXT_PATTERN = re.compile(r"[\u4e00-\u9fff]{2,}|[A-Za-z]{2,}|\d+")
+_SPEAKABLE_TEXT_PATTERN = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]")
 
 _OUTPUT_SAMPLE_RATE = 22_050  # CosyVoice2-0.5B native rate
 _EDGE_OUTPUT_SAMPLE_RATE = 24_000
 _ZERO_SHOT_PROMPT_TEXT = "希望你以后能够做的比我还好呦。"
+_STREAM_INPUT_SAMPLE_RATE = 16_000
+_STREAM_VAD_RMS_THRESHOLD = 650
+_STREAM_VAD_MIN_SPEECH_SECONDS = 0.45
+_STREAM_VAD_SILENCE_SECONDS = 0.95
+_STREAM_VAD_LONG_SPEECH_SECONDS = 2.5
+_STREAM_VAD_LONG_SILENCE_SECONDS = 1.25
+_STREAM_VAD_PRE_ROLL_SECONDS = 0.55
+_STREAM_VAD_MAX_SPEECH_SECONDS = 20.0
 
 
 def _tts_provider() -> str:
@@ -143,6 +154,12 @@ def _is_meaningful_transcript(text: str) -> bool:
     return bool(_MEANINGFUL_TEXT_PATTERN.search(normalized))
 
 
+def _is_speakable_text(text: str) -> bool:
+    """Return whether a streamed segment contains content worth sending to TTS."""
+    normalized = text.strip().strip("\"'“”‘’`")
+    return bool(normalized and _SPEAKABLE_TEXT_PATTERN.search(normalized))
+
+
 def _best_device() -> str:
     """Return the best available PyTorch device: cuda > mps > cpu."""
     try:
@@ -167,9 +184,9 @@ _LLM_DEFAULT_MODELS: dict[str, str] = {
     QWEN_LLM_PROVIDER: "qwen-turbo",
     DEEPSEEK_LLM_PROVIDER: "deepseek-chat",
     GLM_LLM_PROVIDER: "glm-4-flash",
-    # Hermes / local: model must be pulled in Ollama first, e.g.:
+    # OpenAI-compatible local endpoint: model name depends on the target server, e.g. Ollama:
     #   ollama pull nous-hermes-2-mistral
-    HERMES_LLM_PROVIDER: "nous-hermes-2-mistral",
+    OPENAI_COMPAT_LLM_PROVIDER: "nous-hermes-2-mistral",
 }
 
 # ── Global model state ────────────────────────────────────────────────────────
@@ -235,11 +252,11 @@ def _build_llm_client() -> None:
         "qwen"    – Alibaba DashScope (cloud)
         "deepseek"– DeepSeek API (cloud)
         "glm"     – Zhipu GLM API (cloud, e.g. glm-4.7 / glm-4-flash)
-        "hermes"  – Local Ollama / LM Studio / vLLM (no API key required).
-                    Any OpenAI-compatible local server works; configure the
-                    endpoint with HERMES_API_URL (default: http://localhost:11434/v1).
+        "openai_compat" – Local OpenAI-compatible agent/server (no API key required).
+                          Configure the endpoint with OPENAI_COMPAT_API_URL
+                          (default: http://localhost:11434/v1).
     """
-    _all_providers = list(_LLM_CLOUD_ENDPOINTS) + [HERMES_LLM_PROVIDER]
+    _all_providers = list(_LLM_CLOUD_ENDPOINTS) + [OPENAI_COMPAT_LLM_PROVIDER]
     provider = (config.TEXT_LLM_PROVIDER or QWEN_LLM_PROVIDER).strip().lower()
     if provider not in _all_providers:
         logger.warning(
@@ -250,11 +267,11 @@ def _build_llm_client() -> None:
         provider = QWEN_LLM_PROVIDER
 
     api_key: str
-    if provider == HERMES_LLM_PROVIDER:
-        # Local server — no real key needed; "ollama" is a common placeholder
-        base_url = (config.HERMES_API_URL or "http://localhost:11434/v1").rstrip("/")
-        api_key = "ollama"
-        logger.info("Local agent endpoint: %s", base_url)
+    if provider == OPENAI_COMPAT_LLM_PROVIDER:
+        # Some local servers ignore the key, while gateways like OpenClaw may require it.
+        base_url = (config.OPENAI_COMPAT_API_URL or "http://localhost:11434/v1").rstrip("/")
+        api_key = (config.OPENAI_COMPAT_API_KEY or "ollama").strip()
+        logger.info("OpenAI-compatible local agent endpoint: %s", base_url)
     else:
         base_url = _LLM_CLOUD_ENDPOINTS[provider]
         if provider == QWEN_LLM_PROVIDER:
@@ -271,7 +288,8 @@ def _build_llm_client() -> None:
                 logger.warning("GLM_API_KEY / ZHIPUAI_API_KEY not set — /conversation will fail.")
 
     _state.llm_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-    _state.llm_model = (config.MODEL_NAME or "").strip() or _LLM_DEFAULT_MODELS[provider]
+    raw_text_model = (config.TEXT_LLM_MODEL or "").strip()
+    _state.llm_model = raw_text_model or (config.MODEL_NAME or "").strip() or _LLM_DEFAULT_MODELS[provider]
     logger.info("LLM client ready: provider=%s model=%s", provider, _state.llm_model)
 
 
@@ -396,6 +414,9 @@ def _mp3_bytes_to_pcm(mp3_data: bytes, target_rate: int = _EDGE_OUTPUT_SAMPLE_RA
 
 async def _edge_tts_inference(text: str, voice: str) -> bytes:
     """Synthesize text with Edge TTS and return mono int16 PCM bytes."""
+    if not _is_speakable_text(text):
+        return b""
+
     try:
         import edge_tts  # type: ignore[import]
     except ImportError as exc:
@@ -817,35 +838,93 @@ def _pop_tts_segment(buffer: str) -> tuple[str | None, str]:
     return None, buffer
 
 
-@app.post("/conversation")
-async def conversation(request: Request) -> StreamingResponse:
-    """Full ASR → LLM → TTS pipeline in a single streaming request.
+class _StreamingTurnDetector:
+    """Server-side continuous audio VAD with pre-roll to avoid clipping speech starts."""
 
-    Send raw 16 kHz int16 PCM audio; receive 22050 Hz int16 PCM audio back.
+    def __init__(self) -> None:
+        self._pre_roll: deque[NDArray[np.int16]] = deque()
+        self._pre_roll_samples = 0
+        self._speech_chunks: list[NDArray[np.int16]] = []
+        self._speech_samples = 0
+        self._silence_samples = 0
+        self._is_speaking = False
+        self._max_pre_roll_samples = int(_STREAM_INPUT_SAMPLE_RATE * _STREAM_VAD_PRE_ROLL_SECONDS)
 
-    Pass ``X-Session-ID`` from a previous response to continue a conversation.
-    The reply carries a new ``X-Session-ID`` header to use in the next turn.
-    """
-    if _state.funasr_status != "ready" or _state.funasr is None:
-        raise HTTPException(503, detail=f"ASR model not ready: {_state.funasr_status}")
-    if _state.tts_status != "ready" or (_tts_provider() == "cosyvoice" and _state.cosyvoice is None):
-        raise HTTPException(503, detail=f"TTS model not ready: {_state.tts_status}")
-    if _state.llm_client is None:
-        raise HTTPException(503, detail="LLM client not initialised")
+    def _append_pre_roll(self, pcm: NDArray[np.int16]) -> None:
+        chunk = pcm.copy()
+        self._pre_roll.append(chunk)
+        self._pre_roll_samples += chunk.size
+        while self._pre_roll and self._pre_roll_samples > self._max_pre_roll_samples:
+            old = self._pre_roll.popleft()
+            self._pre_roll_samples -= old.size
 
-    body = await request.body()
-    if not body:
-        raise HTTPException(400, detail="Empty audio body")
+    def _reset_speech(self) -> None:
+        self._speech_chunks = []
+        self._speech_samples = 0
+        self._silence_samples = 0
+        self._is_speaking = False
 
-    voice = unquote(request.headers.get("X-Voice", "中文女"))
+    def push(self, pcm: NDArray[np.int16]) -> NDArray[np.int16] | None:
+        if pcm.size == 0:
+            return None
+
+        rms = int(np.sqrt(np.mean(pcm.astype(np.float32) ** 2)))
+        is_speech = rms >= _STREAM_VAD_RMS_THRESHOLD
+
+        if not self._is_speaking:
+            if not is_speech:
+                self._append_pre_roll(pcm)
+                return None
+            self._is_speaking = True
+            self._speech_chunks = [chunk.copy() for chunk in self._pre_roll]
+            self._speech_chunks.append(pcm.copy())
+            self._speech_samples = sum(chunk.size for chunk in self._speech_chunks)
+            self._silence_samples = 0
+            self._pre_roll.clear()
+            self._pre_roll_samples = 0
+            logger.info("Streaming VAD: speech start (rms=%d)", rms)
+            return None
+
+        self._speech_chunks.append(pcm.copy())
+        self._speech_samples += pcm.size
+        if is_speech:
+            self._silence_samples = 0
+        else:
+            self._silence_samples += pcm.size
+
+        speech_seconds = self._speech_samples / _STREAM_INPUT_SAMPLE_RATE
+        silence_seconds = self._silence_samples / _STREAM_INPUT_SAMPLE_RATE
+        required_silence = (
+            _STREAM_VAD_LONG_SILENCE_SECONDS
+            if speech_seconds >= _STREAM_VAD_LONG_SPEECH_SECONDS
+            else _STREAM_VAD_SILENCE_SECONDS
+        )
+        if silence_seconds < required_silence and speech_seconds < _STREAM_VAD_MAX_SPEECH_SECONDS:
+            return None
+
+        audio = np.concatenate(self._speech_chunks)
+        self._reset_speech()
+        if speech_seconds < _STREAM_VAD_MIN_SPEECH_SECONDS:
+            logger.info("Streaming VAD: utterance too short (%.2fs), discarding", speech_seconds)
+            return None
+        logger.info(
+            "Streaming VAD: speech end after %.2fs silence=%.2fs, %d samples",
+            speech_seconds,
+            silence_seconds,
+            audio.size,
+        )
+        return audio
+
+
+def _normalise_tts_voice(voice: str) -> str:
     available_voices = GLM_CHAT_AVAILABLE_VOICES if _tts_provider() == "edge" else COSYVOICE_AVAILABLE_VOICES
-    if voice not in available_voices:
-        voice = config.EDGE_TTS_VOICE if _tts_provider() == "edge" else "中文女"
+    if voice in available_voices:
+        return voice
+    return config.EDGE_TTS_VOICE if _tts_provider() == "edge" else "中文女"
 
-    # ── ASR ──────────────────────────────────────────────────────────────────
-    audio_int16 = np.frombuffer(body, dtype=np.int16)
+
+async def _transcribe_audio_int16(audio_int16: NDArray[np.int16]) -> str:
     audio_float = audio_int16.astype(np.float32) / 32_768.0
-
     loop = asyncio.get_event_loop()
     try:
         asr_result = await loop.run_in_executor(
@@ -862,11 +941,14 @@ async def conversation(request: Request) -> StreamingResponse:
         raise HTTPException(500, detail=f"ASR failed: {exc}")
 
     raw_text = asr_result[0]["text"] if asr_result else ""
-    user_text = _TAG_PATTERN.sub("", raw_text).strip()
-    if not _is_meaningful_transcript(user_text):
-        logger.info("ASR ignored low-content transcript: %r", user_text)
-        return await _empty_pcm_response(user_text)
-    logger.info("ASR → %r", user_text)
+    return _TAG_PATTERN.sub("", raw_text).strip()
+
+
+async def _build_conversation_audio_stream(
+    user_text: str,
+    session_id: str | None,
+    voice: str,
+) -> tuple[str, list[dict[str, object]], AsyncIterator[bytes]]:
     planned_by_llm = False
     reachy_actions = await _plan_reachy_actions_with_llm(user_text)
     planned_by_llm = bool(reachy_actions)
@@ -876,18 +958,14 @@ async def conversation(request: Request) -> StreamingResponse:
         source = "planner" if planned_by_llm else "heuristic"
         logger.info("Reachy actions selected by %s: %s", source, reachy_actions)
 
-    # ── Session + LLM ────────────────────────────────────────────────────────
-    session_id = request.headers.get("X-Session-ID") or str(uuid.uuid4())
-    session = _state.sessions.setdefault(session_id, _Session())
+    active_session_id = session_id or str(uuid.uuid4())
+    session = _state.sessions.setdefault(active_session_id, _Session())
     session.touch()
-
     session.history.append({"role": "user", "content": user_text})
-    # Trim to avoid unbounded context growth
     if len(session.history) > _MAX_HISTORY_TURNS * 2:
         session.history = session.history[-_MAX_HISTORY_TURNS * 2:]
 
     messages = [{"role": "system", "content": _SYSTEM_PROMPT}, *session.history]
-
     try:
         llm_stream = await _state.llm_client.chat.completions.create(
             model=_state.llm_model,
@@ -898,12 +976,12 @@ async def conversation(request: Request) -> StreamingResponse:
         logger.error("LLM error: %s", exc)
         raise HTTPException(502, detail=f"LLM failed: {exc}")
 
-    # ── Streaming TTS generator ───────────────────────────────────────────────
     async def _generate_audio() -> AsyncIterator[bytes]:
         """Consume LLM stream sentence-by-sentence, yield TTS PCM chunks."""
         sentence_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
         audio_queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
         assistant_reply_parts: list[str] = []
+        loop = asyncio.get_event_loop()
 
         def _synth_cosyvoice_sentence(text: str) -> None:
             try:
@@ -934,28 +1012,35 @@ async def conversation(request: Request) -> StreamingResponse:
                         if not sentence:
                             break
                         sentence = _sanitize_spoken_text(sentence)
-                        if sentence:
+                        if _is_speakable_text(sentence):
                             await sentence_queue.put(sentence)
 
                 if sentence_buf.strip():
                     tail_text = _sanitize_spoken_text(sentence_buf.strip())
-                    if tail_text:
+                    if _is_speakable_text(tail_text):
                         await sentence_queue.put(tail_text)
+            except Exception as exc:
+                logger.exception("LLM stream error: %s", exc)
             finally:
                 await sentence_queue.put(None)
 
         async def _synth_sentences() -> None:
-            while True:
-                sentence = await sentence_queue.get()
-                if sentence is None:
-                    break
-                if _tts_provider() == "edge":
-                    audio = await _edge_tts_inference(sentence, voice)
-                    if audio:
-                        await audio_queue.put(audio)
-                else:
-                    await loop.run_in_executor(None, _synth_cosyvoice_sentence, sentence)
-            await audio_queue.put(None)
+            try:
+                while True:
+                    sentence = await sentence_queue.get()
+                    if sentence is None:
+                        break
+                    try:
+                        if _tts_provider() == "edge":
+                            audio = await _edge_tts_inference(sentence, voice)
+                            if audio:
+                                await audio_queue.put(audio)
+                        else:
+                            await loop.run_in_executor(None, _synth_cosyvoice_sentence, sentence)
+                    except Exception as exc:
+                        logger.exception("TTS sentence synthesis failed for %r: %s", sentence[:120], exc)
+            finally:
+                await audio_queue.put(None)
 
         producer_task = asyncio.create_task(_produce_sentences(), name="llm-sentence-producer")
         synth_task = asyncio.create_task(_synth_sentences(), name="tts-synth-worker")
@@ -971,9 +1056,45 @@ async def conversation(request: Request) -> StreamingResponse:
                     task.cancel()
             await asyncio.gather(producer_task, synth_task, return_exceptions=True)
 
-        # Persist assistant turn in session history
         assistant_text = _sanitize_spoken_text("".join(assistant_reply_parts))
         session.history.append({"role": "assistant", "content": assistant_text})
+
+    return active_session_id, reachy_actions, _generate_audio()
+
+
+@app.post("/conversation")
+async def conversation(request: Request) -> StreamingResponse:
+    """Full ASR → LLM → TTS pipeline in a single streaming request.
+
+    Send raw 16 kHz int16 PCM audio; receive 22050 Hz int16 PCM audio back.
+
+    Pass ``X-Session-ID`` from a previous response to continue a conversation.
+    The reply carries a new ``X-Session-ID`` header to use in the next turn.
+    """
+    if _state.funasr_status != "ready" or _state.funasr is None:
+        raise HTTPException(503, detail=f"ASR model not ready: {_state.funasr_status}")
+    if _state.tts_status != "ready" or (_tts_provider() == "cosyvoice" and _state.cosyvoice is None):
+        raise HTTPException(503, detail=f"TTS model not ready: {_state.tts_status}")
+    if _state.llm_client is None:
+        raise HTTPException(503, detail="LLM client not initialised")
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(400, detail="Empty audio body")
+
+    voice = _normalise_tts_voice(unquote(request.headers.get("X-Voice", "中文女")))
+    audio_int16 = np.frombuffer(body, dtype=np.int16)
+
+    user_text = await _transcribe_audio_int16(audio_int16)
+    if not _is_meaningful_transcript(user_text):
+        logger.info("ASR ignored low-content transcript: %r", user_text)
+        return await _empty_pcm_response(user_text)
+    logger.info("ASR → %r", user_text)
+    session_id, reachy_actions, audio_stream = await _build_conversation_audio_stream(
+        user_text,
+        request.headers.get("X-Session-ID"),
+        voice,
+    )
 
     response_headers = {
         "X-Sample-Rate": str(_tts_sample_rate()),
@@ -984,10 +1105,100 @@ async def conversation(request: Request) -> StreamingResponse:
         response_headers["X-Reachy-Actions"] = quote(json.dumps(reachy_actions, ensure_ascii=True))
 
     return StreamingResponse(
-        _generate_audio(),
+        audio_stream,
         media_type="audio/pcm",
         headers=response_headers,
     )
+
+
+@app.websocket("/conversation/ws")
+async def conversation_stream(websocket: WebSocket) -> None:
+    """Continuous PCM stream endpoint.
+
+    The Reachy client sends raw 16 kHz int16 PCM binary frames. The server owns
+    turn detection, ASR, LLM, TTS, and streams response PCM back on the same socket.
+    """
+    await websocket.accept()
+    turn_detector = _StreamingTurnDetector()
+    session_id: str | None = None
+    voice = _normalise_tts_voice("中文女")
+
+    await websocket.send_json({"type": "ready", "sample_rate": _tts_sample_rate()})
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            if "text" in message and message["text"] is not None:
+                try:
+                    data = json.loads(message["text"])
+                except json.JSONDecodeError:
+                    continue
+                if data.get("type") in {"start", "config"}:
+                    raw_session_id = data.get("session_id")
+                    if isinstance(raw_session_id, str) and raw_session_id.strip():
+                        session_id = raw_session_id.strip()
+                    raw_voice = data.get("voice")
+                    if isinstance(raw_voice, str) and raw_voice.strip():
+                        voice = _normalise_tts_voice(raw_voice.strip())
+                elif data.get("type") == "reset":
+                    session_id = None
+                    turn_detector = _StreamingTurnDetector()
+                continue
+
+            raw_bytes = message.get("bytes")
+            if raw_bytes is None:
+                continue
+            if _state.funasr_status != "ready" or _state.funasr is None:
+                await websocket.send_json({"type": "error", "message": f"ASR model not ready: {_state.funasr_status}"})
+                continue
+            if _state.tts_status != "ready" or (_tts_provider() == "cosyvoice" and _state.cosyvoice is None):
+                await websocket.send_json({"type": "error", "message": f"TTS model not ready: {_state.tts_status}"})
+                continue
+            if _state.llm_client is None:
+                await websocket.send_json({"type": "error", "message": "LLM client not initialised"})
+                continue
+
+            pcm = np.frombuffer(raw_bytes, dtype=np.int16)
+            utterance = turn_detector.push(pcm)
+            if utterance is None:
+                continue
+
+            try:
+                user_text = await _transcribe_audio_int16(utterance)
+                if not _is_meaningful_transcript(user_text):
+                    logger.info("Streaming ASR ignored low-content transcript: %r", user_text)
+                    await websocket.send_json({"type": "ignored", "text": user_text})
+                    continue
+                logger.info("Streaming ASR → %r", user_text)
+                session_id, reachy_actions, audio_stream = await _build_conversation_audio_stream(
+                    user_text,
+                    session_id,
+                    voice,
+                )
+                await websocket.send_json(
+                    {
+                        "type": "user_text",
+                        "text": user_text,
+                        "session_id": session_id,
+                        "actions": reachy_actions,
+                    }
+                )
+                await websocket.send_json({"type": "audio_start", "sample_rate": _tts_sample_rate()})
+                async for audio_chunk in audio_stream:
+                    if audio_chunk:
+                        await websocket.send_bytes(audio_chunk)
+                await websocket.send_json({"type": "audio_end", "session_id": session_id})
+            except HTTPException as exc:
+                await websocket.send_json({"type": "error", "message": str(exc.detail)})
+            except WebSocketDisconnect:
+                raise
+            except Exception as exc:
+                logger.exception("Streaming conversation turn failed: %s", exc)
+                await websocket.send_json({"type": "error", "message": str(exc)})
+    except WebSocketDisconnect:
+        logger.info("Streaming conversation websocket disconnected")
 
 
 # ── CLI entry point ───────────────────────────────────────────────────────────
@@ -1008,6 +1219,7 @@ def main() -> None:
     print(f"\n  Reachy Mini Inference Server")
     print(f"   Listening on           http://{args.host}:{args.port}")
     print(f"   Full pipeline:         POST /conversation  (ASR + LLM + TTS)")
+    print(f"   Streaming pipeline:    WS   /conversation/ws  (continuous audio + server VAD)")
     print(f"   ASR only:              POST /asr")
     print(f"   TTS only:              POST /tts")
     print(f"\n   Pi 4 .env (full pipeline — recommended):")
