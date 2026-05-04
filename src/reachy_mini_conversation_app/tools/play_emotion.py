@@ -15,7 +15,7 @@ try:
     # Note: huggingface_hub automatically reads HF_TOKEN from environment variables
     RECORDED_MOVES = RecordedMoves("pollen-robotics/reachy-mini-emotions-library")
     EMOTION_AVAILABLE = True
-except ImportError as e:
+except Exception as e:
     logger.warning(f"Emotion library not available: {e}")
     RECORDED_MOVES = None
     EMOTION_AVAILABLE = False
@@ -38,6 +38,42 @@ def get_available_emotions_and_descriptions() -> str:
         return output
     except Exception as e:
         return f"Error getting emotions: {e}"
+
+
+_SEMANTIC_EMOTION_CANDIDATES = {
+    "happy": ("happy", "smile", "joy", "glad", "love", "heart", "cute", "excited", "yeah", "yes"),
+    "smile": ("smile", "happy", "joy", "cute", "love", "heart"),
+    "curious": ("curious", "question", "wonder", "think", "oops"),
+    "oops": ("oops", "surprise", "shy"),
+}
+
+
+def _choose_emotion(emotion_name: Any, emotion_names: list[str]) -> str:
+    """Resolve semantic aliases to a concrete recorded emotion name."""
+    if not emotion_names:
+        return ""
+
+    requested = str(emotion_name or "").strip()
+    if requested in emotion_names:
+        return requested
+
+    lowered = {name.lower(): name for name in emotion_names}
+    requested_lower = requested.lower()
+    candidates = _SEMANTIC_EMOTION_CANDIDATES.get(requested_lower, ())
+    for keyword in candidates:
+        for lower_name, original_name in lowered.items():
+            if keyword in lower_name:
+                return original_name
+
+    # Random emotion often feels wrong for explicit smile requests. Prefer a positive move by default.
+    for keyword in _SEMANTIC_EMOTION_CANDIDATES["happy"]:
+        for lower_name, original_name in lowered.items():
+            if keyword in lower_name:
+                return original_name
+
+    if requested:
+        raise ValueError(f"Unknown emotion '{requested}'. Available: {emotion_names}")
+    return random.choice(emotion_names)
 
 
 class PlayEmotion(Tool):
@@ -75,11 +111,10 @@ class PlayEmotion(Tool):
             if not emotion_names:
                 return {"error": "No emotions currently available"}
 
-            if not emotion_name:
-                emotion_name = random.choice(emotion_names)
-
-            if emotion_name not in emotion_names:
-                return {"error": f"Unknown emotion '{emotion_name}'. Available: {emotion_names}"}
+            try:
+                emotion_name = _choose_emotion(emotion_name, emotion_names)
+            except ValueError as exc:
+                return {"error": str(exc)}
 
             # Add emotion to queue
             movement_manager = deps.movement_manager

@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
 import time
 from typing import Optional, Tuple
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -75,8 +76,9 @@ _LONG_SPEECH_SECONDS = 2.0
 _MIN_SPEECH_SECONDS = 0.45  # discard utterances shorter than this
 _MIN_POST_SAMPLES = int(_INPUT_SAMPLE_RATE * 0.8)
 _MAX_SPEECH_SECONDS = 18.0
-_BARGE_IN_RMS_THRESHOLD = 1_400
-_BARGE_IN_SECONDS = 0.22
+_BARGE_IN_RMS_THRESHOLD = int(config.REMOTE_BARGE_IN_RMS_THRESHOLD)
+_BARGE_IN_SECONDS = float(config.REMOTE_BARGE_IN_SECONDS)
+_BARGE_IN_PRE_ROLL_SECONDS = float(config.REMOTE_BARGE_IN_PRE_ROLL_SECONDS)
 _PLAYBACK_GUARD_SECONDS = 0.35
 _ALLOWED_REMOTE_ACTIONS = {
     "dance",
@@ -97,6 +99,15 @@ _STREAM_RECONNECT_SECONDS = 1.5
 _REMOTE_ACTION_TIMEOUT = 3.0
 _REMOTE_CALL_TIMEOUT = 45.0
 _IMMEDIATE_REMOTE_ACTIONS = {"stop_dance", "stop_emotion", "do_nothing"}
+
+
+class _ClientConversationState:
+    LISTENING = "LISTENING"
+    THINKING = "THINKING"
+    SPEAKING = "SPEAKING"
+    INTERRUPTING = "INTERRUPTING"
+    RECOVERING = "RECOVERING"
+    DISCONNECTED = "DISCONNECTED"
 
 
 def _to_mono_int16(audio: NDArray) -> NDArray[np.int16]:
@@ -122,6 +133,13 @@ def _derive_stream_url(conversation_url: str) -> str:
     else:
         path = f"{path}/conversation/ws"
     return urlunsplit((scheme, parsed.netloc, path, "", ""))
+
+
+def _initial_remote_session_id() -> str:
+    configured = (getattr(config, "REMOTE_CONVERSATION_SESSION_ID", None) or "").strip()
+    if configured:
+        return configured
+    return socket.gethostname().strip() or "reachy-mini"
 
 
 class RemoteConversationHandler(ConversationHandler):
@@ -165,9 +183,12 @@ class RemoteConversationHandler(ConversationHandler):
         self._playback_until: float = 0.0
         self._barge_in_start: Optional[float] = None
         self._barge_in_callback = None
+        self._barge_in_pre_roll: list[NDArray[np.int16]] = []
+        self._barge_in_pre_roll_samples = 0
+        self._barge_in_max_pre_roll_samples = int(_INPUT_SAMPLE_RATE * _BARGE_IN_PRE_ROLL_SECONDS)
 
         # HTTP session tracking
-        self._session_id: Optional[str] = None
+        self._session_id: Optional[str] = _initial_remote_session_id()
         self._http_client: Optional[httpx.AsyncClient] = None
         self._remote_task: Optional[asyncio.Task[None]] = None
 
@@ -176,10 +197,12 @@ class RemoteConversationHandler(ConversationHandler):
         self._streaming_enabled = bool(getattr(config, "REMOTE_AUDIO_STREAMING", True))
         self._stream_url: str = ""
         self._stream_task: Optional[asyncio.Task[None]] = None
-        self._stream_audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=_STREAM_AUDIO_QUEUE_MAX)
+        self._stream_audio_queue: asyncio.Queue[bytes | str] = asyncio.Queue(maxsize=_STREAM_AUDIO_QUEUE_MAX)
         self._stream_response_active = False
         self._stream_connected = False
         self._stream_output_sample_rate = _OUTPUT_SAMPLE_RATE
+        self._cancelled_response_ids: set[str] = set()
+        self._conversation_state = _ClientConversationState.DISCONNECTED
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -282,10 +305,28 @@ class RemoteConversationHandler(ConversationHandler):
         self._silence_start = None
         self._speech_start = None
         self._barge_in_start = None
+        self._barge_in_pre_roll = []
+        self._barge_in_pre_roll_samples = 0
+
+    def _append_barge_in_pre_roll(self, pcm: NDArray[np.int16]) -> None:
+        chunk = pcm.copy()
+        self._barge_in_pre_roll.append(chunk)
+        self._barge_in_pre_roll_samples += chunk.size
+        while self._barge_in_pre_roll and self._barge_in_pre_roll_samples > self._barge_in_max_pre_roll_samples:
+            old = self._barge_in_pre_roll.pop(0)
+            self._barge_in_pre_roll_samples -= old.size
+
+    def _set_conversation_state(self, state: str, reason: str) -> None:
+        if self._conversation_state == state:
+            return
+        previous = self._conversation_state
+        self._conversation_state = state
+        logger.info("Remote conversation state %s -> %s reason=%s", previous, state, reason)
 
     def _interrupt_response(self) -> None:
         """Cancel in-flight response generation and clear queued playback audio."""
         logger.info("Barge-in: interrupting current response")
+        self._set_conversation_state(_ClientConversationState.INTERRUPTING, "local_barge_in")
         if self._remote_task is not None and not self._remote_task.done():
             self._remote_task.cancel()
         self.clear_output_queue()
@@ -376,6 +417,46 @@ class RemoteConversationHandler(ConversationHandler):
                 logger.warning("Remote action %s timed out after %.1fs", name, _REMOTE_ACTION_TIMEOUT)
             except Exception as exc:
                 logger.exception("Remote action %s raised: %s", name, exc)
+
+    async def _execute_remote_action_event(self, action: dict[str, object], timing: str) -> None:
+        """Execute one event-protocol Reachy action and report the result upstream."""
+        name = action.get("name")
+        arguments = action.get("arguments", {})
+        action_call_id = action.get("action_call_id")
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        result: dict[str, object]
+        logger.info("Executing %s action event: %s %s id=%s", timing, name, arguments, action_call_id)
+        try:
+            result = await asyncio.wait_for(
+                dispatch_tool_call(str(name), json.dumps(arguments), self.deps),
+                timeout=_REMOTE_ACTION_TIMEOUT,
+            )
+            if result.get("error"):
+                logger.warning("Remote action event %s failed: %s", name, result["error"])
+            else:
+                logger.info("Remote action event %s result: %s", name, result)
+        except asyncio.TimeoutError:
+            result = {"error": f"timed out after {_REMOTE_ACTION_TIMEOUT:.1f}s"}
+            logger.warning("Remote action event %s timed out after %.1fs", name, _REMOTE_ACTION_TIMEOUT)
+        except Exception as exc:
+            result = {"error": f"{type(exc).__name__}: {exc}"}
+            logger.exception("Remote action event %s raised: %s", name, exc)
+
+        await self._queue_stream_message(
+            json.dumps(
+                {
+                    "type": "action.result",
+                    "action_call_id": action_call_id,
+                    "name": name,
+                    "timing": timing,
+                    "result": result,
+                    "error": result.get("error"),
+                },
+                ensure_ascii=True,
+            )
+        )
 
     async def _execute_remote_actions(self, actions_header: str, timing: str = "immediate") -> None:
         """Decode and execute Reachy-local actions requested by the Mac inference server."""
@@ -477,20 +558,55 @@ class RemoteConversationHandler(ConversationHandler):
         if not self._stream_connected:
             return
 
-        # Avoid feeding Reachy's own speaker output back into the server VAD.
-        # Barge-in support should use explicit server-side interruption + AEC later.
         if self._stream_response_active or self._is_playback_active():
-            return
+            self._append_barge_in_pre_roll(pcm)
+            rms = int(np.sqrt(np.mean(pcm.astype(np.float32) ** 2)))
+            if rms < _BARGE_IN_RMS_THRESHOLD:
+                self._barge_in_start = None
+                return
+            if self._barge_in_start is None:
+                self._barge_in_start = now
+                return
+            if now - self._barge_in_start < _BARGE_IN_SECONDS:
+                return
 
+            logger.info("Remote stream barge-in detected (rms=%d); interrupting response", rms)
+            self._interrupt_response()
+            self._stream_response_active = False
+            self._processing = False
+            await self._queue_stream_message(
+                json.dumps({"type": "interrupt", "reason": "barge_in"}, ensure_ascii=True)
+            )
+            self._barge_in_start = None
+            self._set_conversation_state(_ClientConversationState.RECOVERING, "barge_in_sent")
+            pre_roll_chunks = self._barge_in_pre_roll
+            pre_roll_samples = self._barge_in_pre_roll_samples
+            self._barge_in_pre_roll = []
+            self._barge_in_pre_roll_samples = 0
+            logger.info(
+                "Remote stream barge-in: forwarding %.2fs pre-roll audio",
+                pre_roll_samples / _INPUT_SAMPLE_RATE,
+            )
+            for chunk in pre_roll_chunks:
+                await self._queue_stream_message(chunk.tobytes())
+            return
+        else:
+            self._barge_in_start = None
+            self._barge_in_pre_roll = []
+            self._barge_in_pre_roll_samples = 0
+
+        await self._queue_stream_message(pcm.tobytes())
+
+    async def _queue_stream_message(self, message: bytes | str) -> None:
         try:
-            self._stream_audio_queue.put_nowait(pcm.tobytes())
+            self._stream_audio_queue.put_nowait(message)
         except asyncio.QueueFull:
             try:
                 self._stream_audio_queue.get_nowait()
             except asyncio.QueueEmpty:
                 pass
             try:
-                self._stream_audio_queue.put_nowait(pcm.tobytes())
+                self._stream_audio_queue.put_nowait(message)
             except asyncio.QueueFull:
                 pass
 
@@ -503,6 +619,7 @@ class RemoteConversationHandler(ConversationHandler):
             try:
                 async with websockets.connect(self._stream_url, max_size=None) as ws:
                     self._stream_connected = True
+                    self._set_conversation_state(_ClientConversationState.LISTENING, "stream_connected")
                     while not self._stream_audio_queue.empty():
                         try:
                             self._stream_audio_queue.get_nowait()
@@ -516,6 +633,7 @@ class RemoteConversationHandler(ConversationHandler):
                                 "session_id": self._session_id,
                                 "voice": self._voice,
                                 "sample_rate": _INPUT_SAMPLE_RATE,
+                                "capabilities": ["interrupt", "response.sentence", "action.call"],
                             },
                             ensure_ascii=True,
                         )
@@ -541,27 +659,40 @@ class RemoteConversationHandler(ConversationHandler):
                 logger.warning("Remote conversation stream disconnected: %s", exc)
                 self._stream_connected = False
                 self._stream_response_active = False
+                self._processing = False
+                self._barge_in_pre_roll = []
+                self._barge_in_pre_roll_samples = 0
+                self._set_conversation_state(_ClientConversationState.DISCONNECTED, "stream_disconnected")
                 await asyncio.sleep(_STREAM_RECONNECT_SECONDS)
 
     async def _stream_sender(self, ws) -> None:
         while True:
-            audio_bytes = await self._stream_audio_queue.get()
-            await ws.send(audio_bytes)
+            message = await self._stream_audio_queue.get()
+            await ws.send(message)
 
     async def _stream_receiver(self, ws) -> None:
         deferred_actions: list[dict[str, object]] = []
         after_speech_actions: list[dict[str, object]] = []
+        deferred_action_events: list[dict[str, object]] = []
+        after_speech_action_events: list[dict[str, object]] = []
         deferred_actions_started = False
 
         async for message in ws:
             if isinstance(message, bytes):
-                if deferred_actions and not deferred_actions_started:
+                if (deferred_actions or deferred_action_events) and not deferred_actions_started:
                     deferred_actions_started = True
                     logger.info("Starting deferred remote actions with first streamed audio chunk.")
-                    asyncio.create_task(
-                        self._execute_remote_action_items(deferred_actions, "speech-synced"),
-                        name="remote-reachy-actions-speech-synced",
-                    )
+                    if deferred_actions:
+                        asyncio.create_task(
+                            self._execute_remote_action_items(deferred_actions, "speech-synced"),
+                            name="remote-reachy-actions-speech-synced",
+                        )
+                    for action_event in deferred_action_events:
+                        asyncio.create_task(
+                            self._execute_remote_action_event(action_event, "speech-synced"),
+                            name="remote-reachy-action-event-speech-synced",
+                        )
+                    deferred_action_events = []
                 pcm_out = np.frombuffer(message, dtype=np.int16)
                 await self.output_queue.put((self._stream_output_sample_rate, pcm_out))
                 continue
@@ -576,6 +707,16 @@ class RemoteConversationHandler(ConversationHandler):
             if msg_type == "ready":
                 self._stream_output_sample_rate = int(data.get("sample_rate") or _OUTPUT_SAMPLE_RATE)
                 logger.info("Remote conversation stream ready at %d Hz", self._stream_output_sample_rate)
+            elif msg_type == "state.changed":
+                state = data.get("state")
+                reason = data.get("reason") or "server_state"
+                if isinstance(state, str) and state:
+                    self._set_conversation_state(state, str(reason))
+            elif msg_type == "session.reset":
+                self._session_id = None
+                self._processing = False
+                self._stream_response_active = False
+                self._set_conversation_state(_ClientConversationState.LISTENING, "session_reset")
             elif msg_type == "user_text":
                 self._session_id = data.get("session_id") or self._session_id
                 user_text = data.get("text") or ""
@@ -585,33 +726,119 @@ class RemoteConversationHandler(ConversationHandler):
                 if isinstance(actions, list):
                     valid_actions = self._decode_remote_actions(json.dumps(actions, ensure_ascii=True))
                     immediate_actions, deferred_actions, after_speech_actions = self._split_remote_actions(valid_actions)
+                    deferred_action_events = []
+                    after_speech_action_events = []
                     deferred_actions_started = False
                     if immediate_actions:
                         asyncio.create_task(
                             self._execute_remote_action_items(immediate_actions, "immediate"),
                             name="remote-reachy-actions-immediate",
                         )
-            elif msg_type == "audio_start":
+            elif msg_type == "response.sentence":
+                text = data.get("text") or ""
+                if text:
+                    logger.info("Assistant sentence: %s", text)
+            elif msg_type == "action.call":
+                logger.info(
+                    "Received remote action call: %s %s timing=%s id=%s",
+                    data.get("name"),
+                    data.get("arguments", {}),
+                    data.get("timing", "speech_start"),
+                    data.get("action_call_id"),
+                )
+                action = {
+                    "name": data.get("name"),
+                    "arguments": data.get("arguments", {}),
+                    "timing": data.get("timing", "speech_start"),
+                }
+                valid_actions = self._decode_remote_actions(json.dumps([action], ensure_ascii=True))
+                immediate_actions, new_deferred_actions, new_after_speech_actions = self._split_remote_actions(
+                    valid_actions
+                )
+                if immediate_actions:
+                    for action_event in immediate_actions:
+                        action_event["action_call_id"] = data.get("action_call_id")
+                    for action_event in immediate_actions:
+                        asyncio.create_task(
+                            self._execute_remote_action_event(action_event, "immediate"),
+                            name="remote-reachy-action-event-immediate",
+                        )
+                for action_event in new_deferred_actions:
+                    action_event["action_call_id"] = data.get("action_call_id")
+                    asyncio.create_task(
+                        self._execute_remote_action_event(action_event, "speech-start"),
+                        name="remote-reachy-action-event-speech-start",
+                    )
+                for action_event in new_after_speech_actions:
+                    action_event["action_call_id"] = data.get("action_call_id")
+                after_speech_action_events.extend(new_after_speech_actions)
+            elif msg_type in {"audio_start", "response.audio.start"}:
                 self._stream_response_active = True
                 self._processing = True
+                self._set_conversation_state(_ClientConversationState.SPEAKING, msg_type)
                 self._stream_output_sample_rate = int(data.get("sample_rate") or self._stream_output_sample_rate)
-            elif msg_type == "audio_end":
-                self._session_id = data.get("session_id") or self._session_id
+                if (deferred_actions or deferred_action_events) and not deferred_actions_started:
+                    deferred_actions_started = True
+                    logger.info("Starting deferred remote actions at audio_start.")
+                    if deferred_actions:
+                        asyncio.create_task(
+                            self._execute_remote_action_items(deferred_actions, "speech-synced"),
+                            name="remote-reachy-actions-speech-synced",
+                        )
+                    for action_event in deferred_action_events:
+                        asyncio.create_task(
+                            self._execute_remote_action_event(action_event, "speech-synced"),
+                            name="remote-reachy-action-event-speech-synced",
+                        )
+                    deferred_action_events = []
+            elif msg_type == "response.cancelled":
+                response_id = data.get("response_id")
+                if isinstance(response_id, str):
+                    self._cancelled_response_ids.add(response_id)
+                self.clear_output_queue()
                 self._stream_response_active = False
                 self._processing = False
-                self._ignore_until = time.monotonic() + 0.2
-                if after_speech_actions:
+                self._playback_until = 0.0
+                self._set_conversation_state(_ClientConversationState.LISTENING, "response_cancelled")
+            elif msg_type in {"audio_end", "response.done"}:
+                self._session_id = data.get("session_id") or self._session_id
+                response_id = data.get("response_id")
+                response_was_cancelled = (
+                    isinstance(response_id, str)
+                    and response_id in self._cancelled_response_ids
+                )
+                if response_was_cancelled:
+                    self._cancelled_response_ids.discard(response_id)
+                self._stream_response_active = False
+                self._processing = False
+                self._set_conversation_state(_ClientConversationState.LISTENING, msg_type)
+                if not response_was_cancelled:
+                    self._ignore_until = time.monotonic() + 0.2
+                if (after_speech_actions or after_speech_action_events) and not response_was_cancelled:
                     logger.info("Starting after-speech remote actions.")
-                    asyncio.create_task(
-                        self._execute_remote_action_items(after_speech_actions, "after-speech"),
-                        name="remote-reachy-actions-after-speech",
-                    )
+                    actions_to_run = after_speech_actions
+                    after_speech_actions = []
+                    if actions_to_run:
+                        asyncio.create_task(
+                            self._execute_remote_action_items(actions_to_run, "after-speech"),
+                            name="remote-reachy-actions-after-speech",
+                        )
+                    action_events_to_run = after_speech_action_events
+                    after_speech_action_events = []
+                    for action_event in action_events_to_run:
+                        asyncio.create_task(
+                            self._execute_remote_action_event(action_event, "after-speech"),
+                            name="remote-reachy-action-event-after-speech",
+                        )
             elif msg_type == "ignored":
                 text = data.get("text")
                 logger.info("Remote stream ignored transcript: %r", text)
+                self._processing = False
+                self._set_conversation_state(_ClientConversationState.LISTENING, "ignored")
             elif msg_type == "error":
                 self._stream_response_active = False
                 self._processing = False
+                self._set_conversation_state(_ClientConversationState.LISTENING, "error")
                 logger.error("Remote stream error: %s", data.get("message"))
 
     # ── Remote call ───────────────────────────────────────────────────────────

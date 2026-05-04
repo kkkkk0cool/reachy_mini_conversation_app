@@ -76,7 +76,8 @@ import logging
 import argparse
 from pathlib import Path
 from collections import deque
-from typing import Any, AsyncIterator, Optional
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 from urllib.parse import quote, unquote
 
 import numpy as np
@@ -105,16 +106,19 @@ logger = logging.getLogger(__name__)
 _TAG_PATTERN = re.compile(r"<\|[^|]+\|>")
 _MEANINGFUL_TEXT_PATTERN = re.compile(r"[\u4e00-\u9fff]{2,}|[A-Za-z]{2,}|\d+")
 _SPEAKABLE_TEXT_PATTERN = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]")
+_TTS_EDGE_PUNCTUATION_RE = re.compile(r"^[\s\"'“”‘’`.,，、;；:：!?！？。…-]+$")
 
 _OUTPUT_SAMPLE_RATE = 22_050  # CosyVoice2-0.5B native rate
 _EDGE_OUTPUT_SAMPLE_RATE = 24_000
 _ZERO_SHOT_PROMPT_TEXT = "希望你以后能够做的比我还好呦。"
 _STREAM_INPUT_SAMPLE_RATE = 16_000
-_STREAM_VAD_RMS_THRESHOLD = 650
+_STREAM_VAD_RMS_THRESHOLD = int(config.STREAM_VAD_RMS_THRESHOLD)
+_STREAM_VAD_NOISE_MARGIN = int(config.STREAM_VAD_NOISE_MARGIN)
+_STREAM_VAD_CONTINUE_RATIO = float(config.STREAM_VAD_CONTINUE_RATIO)
 _STREAM_VAD_MIN_SPEECH_SECONDS = 0.45
-_STREAM_VAD_SILENCE_SECONDS = 0.95
+_STREAM_VAD_SILENCE_SECONDS = float(config.STREAM_VAD_SILENCE_SECONDS)
 _STREAM_VAD_LONG_SPEECH_SECONDS = 2.5
-_STREAM_VAD_LONG_SILENCE_SECONDS = 1.25
+_STREAM_VAD_LONG_SILENCE_SECONDS = float(config.STREAM_VAD_LONG_SILENCE_SECONDS)
 _STREAM_VAD_PRE_ROLL_SECONDS = 0.55
 _STREAM_VAD_MAX_SPEECH_SECONDS = 20.0
 
@@ -157,7 +161,11 @@ def _is_meaningful_transcript(text: str) -> bool:
 def _is_speakable_text(text: str) -> bool:
     """Return whether a streamed segment contains content worth sending to TTS."""
     normalized = text.strip().strip("\"'“”‘’`")
-    return bool(normalized and _SPEAKABLE_TEXT_PATTERN.search(normalized))
+    return bool(
+        normalized
+        and _SPEAKABLE_TEXT_PATTERN.search(normalized)
+        and not _TTS_EDGE_PUNCTUATION_RE.fullmatch(normalized)
+    )
 
 
 def _best_device() -> str:
@@ -234,6 +242,14 @@ async def _startup() -> None:
     """Load FunASR and CosyVoice2 models in background threads; build LLM client."""
     _state.device = _best_device()
     logger.info("Inference server starting on device: %s", _state.device)
+    logger.info("Inference server module path: %s", __file__)
+    logger.info(
+        "Runtime config: tts_provider=%s fast_response=%s action_tools=%s action_planner=%s",
+        _tts_provider(),
+        bool(config.FAST_RESPONSE_ENABLED),
+        bool(config.REACHY_AGENT_TOOLS_ENABLED),
+        bool(config.REACHY_ACTION_PLANNER_ENABLED),
+    )
     _build_llm_client()
     loop = asyncio.get_event_loop()
     loop.create_task(_load_funasr())
@@ -291,6 +307,73 @@ def _build_llm_client() -> None:
     raw_text_model = (config.TEXT_LLM_MODEL or "").strip()
     _state.llm_model = raw_text_model or (config.MODEL_NAME or "").strip() or _LLM_DEFAULT_MODELS[provider]
     logger.info("LLM client ready: provider=%s model=%s", provider, _state.llm_model)
+
+
+def _openai_compat_session_mode() -> str:
+    return (config.OPENAI_COMPAT_SESSION_MODE or "auto").strip().lower()
+
+
+def _uses_openclaw_session_routing() -> bool:
+    mode = _openai_compat_session_mode()
+    if mode in {"0", "false", "off", "none", "client_history", "local_history"}:
+        return False
+    if mode in {"1", "true", "on", "openclaw", "server", "server_history"}:
+        return True
+    model = (_state.llm_model or config.TEXT_LLM_MODEL or "").strip().lower()
+    return (config.TEXT_LLM_PROVIDER or "").strip().lower() == OPENAI_COMPAT_LLM_PROVIDER and model.startswith("openclaw")
+
+
+def _openclaw_session_key(session_id: str, *, purpose: str = "conversation") -> str:
+    namespace = (config.OPENAI_COMPAT_SESSION_KEY or "reachy-mini").strip() or "reachy-mini"
+    if purpose == "conversation":
+        return f"{namespace}:{session_id}"
+    return f"{namespace}:{purpose}"
+
+
+def _openclaw_request_options(session_id: str, *, purpose: str = "conversation") -> dict[str, Any]:
+    if not _uses_openclaw_session_routing():
+        return {}
+
+    session_key = _openclaw_session_key(session_id, purpose=purpose)
+    headers = {"x-openclaw-session-key": session_key}
+    channel = (config.OPENAI_COMPAT_MESSAGE_CHANNEL or "").strip()
+    if channel:
+        headers["x-openclaw-message-channel"] = channel
+    return {
+        "extra_headers": headers,
+        "user": session_key,
+    }
+
+
+def _default_conversation_session_id() -> str:
+    configured = (getattr(config, "REMOTE_CONVERSATION_SESSION_ID", None) or "").strip()
+    if configured:
+        return configured
+    if _uses_openclaw_session_routing():
+        namespace = (config.OPENAI_COMPAT_SESSION_KEY or "reachy-mini").strip() or "reachy-mini"
+        return namespace
+    return str(uuid.uuid4())
+
+
+def _looks_like_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _resolve_conversation_session_id(session_id: str | None) -> str:
+    configured = (getattr(config, "REMOTE_CONVERSATION_SESSION_ID", None) or "").strip()
+    if configured:
+        return configured
+
+    clean_session_id = (session_id or "").strip()
+    if _uses_openclaw_session_routing() and (not clean_session_id or _looks_like_uuid(clean_session_id)):
+        return _default_conversation_session_id()
+    if clean_session_id:
+        return clean_session_id
+    return _default_conversation_session_id()
 
 
 async def _session_cleanup_loop() -> None:
@@ -572,6 +655,7 @@ async def tts(req: _TTSRequest) -> StreamingResponse:
 
 _SENTENCE_ENDS = re.compile(r"[.!?。！？\n]")
 _CLAUSE_ENDS = re.compile(r"[,，、;；:：]")
+_TRAILING_QUOTE_CHARS = "\"'”’」』》）)]"
 _MIN_CLAUSE_CHARS = 12
 _MAX_TTS_CHARS = 36
 _MAX_HISTORY_TURNS = 10
@@ -600,6 +684,60 @@ _ACTION_PLANNER_PROMPT = (
     "stop_dance 和 stop_emotion 的 timing 用 immediate。"
     "普通动作默认 timing 用 speech_start；如果用户明确说“说完后/等会儿/最后再做”，用 after_speech。"
     "不要把聊天回复写进 JSON。"
+)
+
+_REACHY_ACTION_TOOL_SCHEMA: dict[str, object] = {
+    "type": "function",
+    "function": {
+        "name": "reachy_action",
+        "description": (
+            "Control Reachy Mini's physical body. Use this only when the user explicitly asks "
+            "the robot to move, dance, smile/show emotion, stop moving, or change head tracking."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "enum": [
+                        "dance",
+                        "stop_dance",
+                        "play_emotion",
+                        "stop_emotion",
+                        "move_head",
+                        "head_tracking",
+                        "do_nothing",
+                    ],
+                    "description": "The Reachy body capability to invoke.",
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": (
+                        "Tool arguments. move_head requires {'direction':'left|right|up|down|front'}; "
+                        "head_tracking uses {'start': true|false}; "
+                        "play_emotion can use {'emotion':'happy|smile|curious|oops'}."
+                    ),
+                    "additionalProperties": True,
+                },
+                "timing": {
+                    "type": "string",
+                    "enum": ["immediate", "speech_start", "after_speech"],
+                    "description": "When Reachy should execute the action relative to the spoken reply.",
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+_ACTION_TOOL_SYSTEM_PROMPT = (
+    "You decide whether Reachy Mini should use its physical body tools for the user's latest request. "
+    "Reachy can dance, stop dancing, show/stop emotion, move its head left/right/up/down/front, "
+    "enable/disable head tracking, or intentionally do nothing. "
+    "For smile/laugh/happy requests, call reachy_action with name=play_emotion and arguments={'emotion':'happy'}. "
+    "Call reachy_action only for explicit robot body/action requests. "
+    "For normal conversation, do not call tools. Do not answer the user here."
 )
 
 _SYSTEM_PROMPT = (
@@ -708,6 +846,65 @@ def _parse_action_plan_json(text: str) -> list[dict[str, object]]:
     return actions
 
 
+def _parse_reachy_action_tool_calls(response: Any) -> list[dict[str, object]]:
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return []
+    message = getattr(choices[0], "message", None)
+    tool_calls = getattr(message, "tool_calls", None) or []
+
+    actions: list[dict[str, object]] = []
+    for call in tool_calls[:4]:
+        function = getattr(call, "function", None)
+        if getattr(function, "name", None) != "reachy_action":
+            continue
+        raw_args = getattr(function, "arguments", "") or "{}"
+        try:
+            parsed_args = json.loads(raw_args)
+        except Exception as exc:
+            logger.warning("Invalid reachy_action tool arguments: %s content=%r", exc, raw_args[:240])
+            continue
+        action = _normalise_reachy_action(parsed_args)
+        if action:
+            actions.append(action)
+    return actions
+
+
+async def _plan_reachy_actions_with_agent_tools(user_text: str) -> list[dict[str, object]]:
+    """Ask the OpenAI-compatible agent to select Reachy tools via native tool calls."""
+    if not config.REACHY_AGENT_TOOLS_ENABLED or _state.llm_client is None:
+        return []
+
+    timeout = max(0.1, float(config.REACHY_ACTION_PLANNER_TIMEOUT or 0.8))
+    try:
+        response = await asyncio.wait_for(
+            _state.llm_client.chat.completions.create(
+                model=_state.llm_model,
+                messages=[
+                    {"role": "system", "content": _ACTION_TOOL_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_text},
+                ],
+                tools=[_REACHY_ACTION_TOOL_SCHEMA],  # type: ignore[list-item]
+                tool_choice="auto",
+                temperature=0,
+                max_tokens=80,
+                **_openclaw_request_options("agent-tools", purpose="planner-agent-tools"),
+            ),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.info("Agent tool planner timed out after %.2fs; using fallback action planning.", timeout)
+        return []
+    except Exception as exc:
+        logger.warning("Agent tool planner failed: %s; using fallback action planning.", exc)
+        return []
+
+    actions = _parse_reachy_action_tool_calls(response)
+    if actions:
+        logger.info("Reachy actions planned by agent tool calls: %s", actions)
+    return actions
+
+
 async def _plan_reachy_actions_with_llm(user_text: str) -> list[dict[str, object]]:
     """Ask the local LLM for a structured action plan, independent of spoken reply."""
     if not config.REACHY_ACTION_PLANNER_ENABLED or _state.llm_client is None:
@@ -724,6 +921,7 @@ async def _plan_reachy_actions_with_llm(user_text: str) -> list[dict[str, object
                 ],
                 temperature=0,
                 max_tokens=220,
+                **_openclaw_request_options("json-planner", purpose="planner-json"),
             ),
             timeout=timeout,
         )
@@ -751,6 +949,16 @@ def _sanitize_spoken_text(text: str) -> str:
     if _TAIL_ACTION_MARKER in spoken_text:
         spoken_text = spoken_text.split(_TAIL_ACTION_MARKER, 1)[0]
     return spoken_text.strip()
+
+
+def _sanitize_tts_segment(text: str) -> str:
+    """Return a TTS-safe sentence fragment, or an empty string if it is only punctuation."""
+    spoken_text = _sanitize_spoken_text(text)
+    spoken_text = spoken_text.strip().strip("\"'“”‘’`")
+    spoken_text = re.sub(r"\s+", " ", spoken_text).strip()
+    if not _is_speakable_text(spoken_text):
+        return ""
+    return spoken_text
 
 
 def _infer_reachy_actions_from_user_text(text: str) -> list[dict[str, object]]:
@@ -793,8 +1001,21 @@ def _infer_reachy_actions_from_user_text(text: str) -> list[dict[str, object]]:
     if direction:
         add("move_head", {"direction": direction}, default_timing)
 
-    if any(k in normalized for k in ("开心一点", "笑一下", "高兴一点", "卖个萌", "表现开心", "开心一下")):
-        add("play_emotion", {}, default_timing)
+    if any(
+        k in normalized
+        for k in (
+            "开心一点",
+            "笑一下",
+            "笑一个",
+            "笑一笑",
+            "微笑一下",
+            "高兴一点",
+            "卖个萌",
+            "表现开心",
+            "开心一下",
+        )
+    ):
+        add("play_emotion", {"emotion": "happy"}, default_timing)
     if any(k in normalized for k in ("停止表情", "别做表情", "停止情绪")):
         add("stop_emotion", {"dummy": True})
 
@@ -809,11 +1030,50 @@ def _infer_reachy_actions_from_user_text(text: str) -> list[dict[str, object]]:
     return actions[:4]
 
 
+def _fast_action_reply(user_text: str, actions: list[dict[str, object]]) -> str | None:
+    """Return a short local reply for clear action-only commands."""
+    if not config.FAST_ACTION_REPLY_ENABLED or not actions:
+        return None
+
+    normalized = re.sub(r"\s+", "", user_text.lower())
+    if any(k in normalized for k in ("?", "？", "吗", "呢", "什么", "为什么", "怎么", "如何", "告诉", "解释", "介绍")):
+        return None
+
+    names = {str(action.get("name")) for action in actions}
+    if "do_nothing" in names:
+        return "好，我安静待着。"
+    if "stop_dance" in names or "stop_emotion" in names:
+        return "好，我停下。"
+    if "move_head" in names:
+        for action in actions:
+            if action.get("name") != "move_head":
+                continue
+            arguments = action.get("arguments", {})
+            direction = arguments.get("direction") if isinstance(arguments, dict) else None
+            direction_text = {
+                "left": "左边",
+                "right": "右边",
+                "up": "上面",
+                "down": "下面",
+                "front": "前面",
+            }.get(str(direction), "那边")
+            return f"好，看{direction_text}。"
+    if "play_emotion" in names:
+        return "好呀。"
+    if "dance" in names:
+        return "好，跳一段。"
+    if "head_tracking" in names:
+        return "好，我看着你。"
+    return "好。"
+
+
 def _pop_tts_segment(buffer: str) -> tuple[str | None, str]:
     """Pop one speech-friendly text segment from a streaming LLM buffer."""
     sentence_match = _SENTENCE_ENDS.search(buffer)
     if sentence_match:
         end = sentence_match.end()
+        while end < len(buffer) and buffer[end] in _TRAILING_QUOTE_CHARS:
+            end += 1
         return buffer[:end].strip(), buffer[end:]
 
     if len(buffer) >= _MIN_CLAUSE_CHARS:
@@ -849,6 +1109,19 @@ class _StreamingTurnDetector:
         self._silence_samples = 0
         self._is_speaking = False
         self._max_pre_roll_samples = int(_STREAM_INPUT_SAMPLE_RATE * _STREAM_VAD_PRE_ROLL_SECONDS)
+        self._noise_rms = 120.0
+        self._last_start_threshold = _STREAM_VAD_RMS_THRESHOLD
+
+    def _start_threshold(self) -> int:
+        return max(_STREAM_VAD_RMS_THRESHOLD, int(self._noise_rms + _STREAM_VAD_NOISE_MARGIN))
+
+    def _continue_threshold(self) -> int:
+        return max(180, int(self._last_start_threshold * _STREAM_VAD_CONTINUE_RATIO))
+
+    def _update_noise_floor(self, rms: int) -> None:
+        # Track quiet background slowly; ignore loud transients so speech does not raise the floor.
+        if rms < self._start_threshold():
+            self._noise_rms = (self._noise_rms * 0.98) + (float(rms) * 0.02)
 
     def _append_pre_roll(self, pcm: NDArray[np.int16]) -> None:
         chunk = pcm.copy()
@@ -869,20 +1142,29 @@ class _StreamingTurnDetector:
             return None
 
         rms = int(np.sqrt(np.mean(pcm.astype(np.float32) ** 2)))
-        is_speech = rms >= _STREAM_VAD_RMS_THRESHOLD
+        start_threshold = self._start_threshold()
+        continue_threshold = self._continue_threshold()
+        is_speech = rms >= (continue_threshold if self._is_speaking else start_threshold)
 
         if not self._is_speaking:
             if not is_speech:
+                self._update_noise_floor(rms)
                 self._append_pre_roll(pcm)
                 return None
             self._is_speaking = True
+            self._last_start_threshold = start_threshold
             self._speech_chunks = [chunk.copy() for chunk in self._pre_roll]
             self._speech_chunks.append(pcm.copy())
             self._speech_samples = sum(chunk.size for chunk in self._speech_chunks)
             self._silence_samples = 0
             self._pre_roll.clear()
             self._pre_roll_samples = 0
-            logger.info("Streaming VAD: speech start (rms=%d)", rms)
+            logger.info(
+                "Streaming VAD: speech start (rms=%d threshold=%d noise=%.1f)",
+                rms,
+                start_threshold,
+                self._noise_rms,
+            )
             return None
 
         self._speech_chunks.append(pcm.copy())
@@ -891,6 +1173,7 @@ class _StreamingTurnDetector:
             self._silence_samples = 0
         else:
             self._silence_samples += pcm.size
+            self._update_noise_floor(rms)
 
         speech_seconds = self._speech_samples / _STREAM_INPUT_SAMPLE_RATE
         silence_seconds = self._silence_samples / _STREAM_INPUT_SAMPLE_RATE
@@ -948,29 +1231,129 @@ async def _build_conversation_audio_stream(
     user_text: str,
     session_id: str | None,
     voice: str,
+    on_sentence: Callable[[str], Awaitable[None]] | None = None,
 ) -> tuple[str, list[dict[str, object]], AsyncIterator[bytes]]:
-    planned_by_llm = False
-    reachy_actions = await _plan_reachy_actions_with_llm(user_text)
-    planned_by_llm = bool(reachy_actions)
-    if not reachy_actions:
-        reachy_actions = _infer_reachy_actions_from_user_text(user_text)
+    action_source = ""
+    reachy_actions = _infer_reachy_actions_from_user_text(user_text)
     if reachy_actions:
-        source = "planner" if planned_by_llm else "heuristic"
-        logger.info("Reachy actions selected by %s: %s", source, reachy_actions)
+        action_source = "heuristic"
+    if not reachy_actions:
+        reachy_actions = await _plan_reachy_actions_with_agent_tools(user_text)
+        if reachy_actions:
+            action_source = "agent_tools"
+    if not reachy_actions:
+        reachy_actions = await _plan_reachy_actions_with_llm(user_text)
+        if reachy_actions:
+            action_source = "planner"
+    if reachy_actions:
+        logger.info("Reachy actions selected by %s: %s", action_source, reachy_actions)
 
-    active_session_id = session_id or str(uuid.uuid4())
+    active_session_id = _resolve_conversation_session_id(session_id)
     session = _state.sessions.setdefault(active_session_id, _Session())
     session.touch()
     session.history.append({"role": "user", "content": user_text})
     if len(session.history) > _MAX_HISTORY_TURNS * 2:
         session.history = session.history[-_MAX_HISTORY_TURNS * 2:]
 
-    messages = [{"role": "system", "content": _SYSTEM_PROMPT}, *session.history]
+    fast_action_reply = _fast_action_reply(user_text, reachy_actions)
+    if fast_action_reply:
+        pipeline_started_at = time.perf_counter()
+
+        async def _generate_fast_action_audio() -> AsyncIterator[bytes]:
+            if on_sentence is not None:
+                await on_sentence(fast_action_reply)
+            logger.info("Fast action reply start text=%r", fast_action_reply)
+            tts_started_at = time.perf_counter()
+            audio_chunk_count = 0
+            audio_total_bytes = 0
+            try:
+                if _tts_provider() == "edge":
+                    audio = await _edge_tts_inference(fast_action_reply, voice)
+                    logger.info(
+                        "Fast action reply TTS edge done audio_bytes=%d duration=%.3fs",
+                        len(audio or b""),
+                        time.perf_counter() - tts_started_at,
+                    )
+                    if audio:
+                        audio_chunk_count += 1
+                        audio_total_bytes += len(audio)
+                        logger.info(
+                            "Fast action reply first audio chunk after %.3fs bytes=%d",
+                            time.perf_counter() - pipeline_started_at,
+                            len(audio),
+                        )
+                        yield audio
+                else:
+                    loop = asyncio.get_event_loop()
+
+                    def _collect_cosyvoice_chunks() -> list[bytes]:
+                        chunks: list[bytes] = []
+                        for output in _cosyvoice_inference(fast_action_reply, voice, stream=True):
+                            tensor = output["tts_speech"]
+                            pcm_float = tensor.squeeze().numpy()
+                            pcm_int16 = (pcm_float * 32_768).clip(-32_768, 32_767).astype(np.int16)
+                            chunks.append(pcm_int16.tobytes())
+                        return chunks
+
+                    chunks = await loop.run_in_executor(None, _collect_cosyvoice_chunks)
+                    logger.info(
+                        "Fast action reply TTS cosyvoice done chunks=%d duration=%.3fs",
+                        len(chunks),
+                        time.perf_counter() - tts_started_at,
+                    )
+                    for chunk in chunks:
+                        audio_chunk_count += 1
+                        audio_total_bytes += len(chunk)
+                        if audio_chunk_count == 1:
+                            logger.info(
+                                "Fast action reply first audio chunk after %.3fs bytes=%d",
+                                time.perf_counter() - pipeline_started_at,
+                                len(chunk),
+                            )
+                        yield chunk
+            finally:
+                session.history.append({"role": "assistant", "content": fast_action_reply})
+                logger.info(
+                    "Fast action reply done total=%.3fs audio_chunks=%d audio_bytes=%d",
+                    time.perf_counter() - pipeline_started_at,
+                    audio_chunk_count,
+                    audio_total_bytes,
+                )
+
+        logger.info("Using fast action reply; skipping OpenClaw request text=%r", fast_action_reply)
+        return active_session_id, reachy_actions, _generate_fast_action_audio()
+
+    if _uses_openclaw_session_routing():
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_text},
+        ]
+        logger.info(
+            "Using OpenClaw server-side session routing key=%s; sending current turn only.",
+            _openclaw_session_key(active_session_id),
+        )
+    else:
+        messages = [{"role": "system", "content": _SYSTEM_PROMPT}, *session.history]
+
+    pipeline_started_at = time.perf_counter()
+    llm_request_started_at = time.perf_counter()
+    logger.info(
+        "OpenClaw request start session_key=%s model=%s text_len=%d",
+        _openclaw_session_key(active_session_id) if _uses_openclaw_session_routing() else active_session_id,
+        _state.llm_model,
+        len(user_text),
+    )
     try:
         llm_stream = await _state.llm_client.chat.completions.create(
             model=_state.llm_model,
             messages=messages,  # type: ignore[arg-type]
             stream=True,
+            **_openclaw_request_options(active_session_id),
+        )
+        logger.info(
+            "OpenClaw stream opened in %.3fs session_key=%s",
+            time.perf_counter() - llm_request_started_at,
+            _openclaw_session_key(active_session_id) if _uses_openclaw_session_routing() else active_session_id,
         )
     except Exception as exc:
         logger.error("LLM error: %s", exc)
@@ -983,20 +1366,73 @@ async def _build_conversation_audio_stream(
         assistant_reply_parts: list[str] = []
         loop = asyncio.get_event_loop()
 
-        def _synth_cosyvoice_sentence(text: str) -> None:
+        def _synth_cosyvoice_sentence(text: str, sentence_index: int) -> None:
+            tts_started_at = time.perf_counter()
+            first_chunk_logged = False
+            chunk_count = 0
+            total_bytes = 0
             try:
                 for output in _cosyvoice_inference(text, voice, stream=True):
                     tensor = output["tts_speech"]
                     pcm_float = tensor.squeeze().numpy()
                     pcm_int16 = (pcm_float * 32_768).clip(-32_768, 32_767).astype(np.int16)
-                    asyncio.run_coroutine_threadsafe(audio_queue.put(pcm_int16.tobytes()), loop)
+                    chunk = pcm_int16.tobytes()
+                    chunk_count += 1
+                    total_bytes += len(chunk)
+                    if not first_chunk_logged:
+                        first_chunk_logged = True
+                        logger.info(
+                            "TTS cosyvoice first chunk sentence=%d after %.3fs text=%r",
+                            sentence_index,
+                            time.perf_counter() - tts_started_at,
+                            text[:80],
+                        )
+                    asyncio.run_coroutine_threadsafe(audio_queue.put(chunk), loop)
+                logger.info(
+                    "TTS cosyvoice done sentence=%d chunks=%d audio_bytes=%d duration=%.3fs",
+                    sentence_index,
+                    chunk_count,
+                    total_bytes,
+                    time.perf_counter() - tts_started_at,
+                )
             except Exception as exc:
                 logger.error("TTS error: %s", exc)
 
         async def _produce_sentences() -> None:
             sentence_buf = ""
+            next_chunk_task: asyncio.Task[Any] | None = None
             try:
-                async for delta_chunk in llm_stream:
+                first_delta_logged = False
+                sentence_index = 0
+                fast_response_sent = False
+                fast_response_timeout = max(0.1, float(config.FAST_RESPONSE_TIMEOUT or 1.2))
+                fast_response_text = _sanitize_tts_segment((config.FAST_RESPONSE_TEXT or "我想想。").strip())
+                fast_response_enabled = (
+                    bool(config.FAST_RESPONSE_ENABLED)
+                    and not reachy_actions
+                    and _is_speakable_text(fast_response_text)
+                )
+                llm_iter = llm_stream.__aiter__()
+                next_chunk_task = asyncio.create_task(llm_iter.__anext__(), name="llm-stream-next-chunk")
+
+                while True:
+                    if not first_delta_logged and fast_response_enabled and not fast_response_sent:
+                        done, _ = await asyncio.wait({next_chunk_task}, timeout=fast_response_timeout)
+                        if not done:
+                            fast_response_sent = True
+                            logger.info(
+                                "Fast response sentence queued after %.3fs text=%r",
+                                time.perf_counter() - pipeline_started_at,
+                                fast_response_text[:80],
+                            )
+                            await sentence_queue.put(fast_response_text)
+                            continue
+                    try:
+                        delta_chunk = await next_chunk_task
+                    except StopAsyncIteration:
+                        break
+                    next_chunk_task = asyncio.create_task(llm_iter.__anext__(), name="llm-stream-next-chunk")
+
                     choices = getattr(delta_chunk, "choices", None) or []
                     if not choices:
                         continue
@@ -1004,6 +1440,12 @@ async def _build_conversation_audio_stream(
                     delta = getattr(delta_obj, "content", None) or ""
                     if not delta:
                         continue
+                    if not first_delta_logged:
+                        first_delta_logged = True
+                        logger.info(
+                            "OpenClaw first token after %.3fs",
+                            time.perf_counter() - llm_request_started_at,
+                        )
                     sentence_buf += delta
                     assistant_reply_parts.append(delta)
 
@@ -1011,32 +1453,79 @@ async def _build_conversation_audio_stream(
                         sentence, sentence_buf = _pop_tts_segment(sentence_buf)
                         if not sentence:
                             break
-                        sentence = _sanitize_spoken_text(sentence)
+                        sentence = _sanitize_tts_segment(sentence)
                         if _is_speakable_text(sentence):
+                            sentence_index += 1
+                            logger.info(
+                                "OpenClaw sentence ready sentence=%d after %.3fs chars=%d text=%r",
+                                sentence_index,
+                                time.perf_counter() - pipeline_started_at,
+                                len(sentence),
+                                sentence[:80],
+                            )
                             await sentence_queue.put(sentence)
 
                 if sentence_buf.strip():
-                    tail_text = _sanitize_spoken_text(sentence_buf.strip())
+                    tail_text = _sanitize_tts_segment(sentence_buf.strip())
                     if _is_speakable_text(tail_text):
+                        sentence_index += 1
+                        logger.info(
+                            "OpenClaw sentence ready sentence=%d after %.3fs chars=%d text=%r",
+                            sentence_index,
+                            time.perf_counter() - pipeline_started_at,
+                            len(tail_text),
+                            tail_text[:80],
+                        )
                         await sentence_queue.put(tail_text)
             except Exception as exc:
                 logger.exception("LLM stream error: %s", exc)
             finally:
+                if next_chunk_task is not None and not next_chunk_task.done():
+                    next_chunk_task.cancel()
+                logger.info(
+                    "OpenClaw stream completed in %.3fs chars=%d",
+                    time.perf_counter() - llm_request_started_at,
+                    len("".join(assistant_reply_parts)),
+                )
                 await sentence_queue.put(None)
 
         async def _synth_sentences() -> None:
+            sentence_index = 0
             try:
                 while True:
                     sentence = await sentence_queue.get()
                     if sentence is None:
                         break
+                    sentence_index += 1
                     try:
+                        if on_sentence is not None:
+                            await on_sentence(sentence)
+                        tts_started_at = time.perf_counter()
+                        provider = _tts_provider()
+                        logger.info(
+                            "TTS start provider=%s sentence=%d chars=%d text=%r",
+                            provider,
+                            sentence_index,
+                            len(sentence),
+                            sentence[:80],
+                        )
                         if _tts_provider() == "edge":
                             audio = await _edge_tts_inference(sentence, voice)
                             if audio:
                                 await audio_queue.put(audio)
+                            logger.info(
+                                "TTS edge done sentence=%d audio_bytes=%d duration=%.3fs",
+                                sentence_index,
+                                len(audio or b""),
+                                time.perf_counter() - tts_started_at,
+                            )
                         else:
-                            await loop.run_in_executor(None, _synth_cosyvoice_sentence, sentence)
+                            await loop.run_in_executor(None, _synth_cosyvoice_sentence, sentence, sentence_index)
+                            logger.info(
+                                "TTS cosyvoice worker returned sentence=%d duration=%.3fs",
+                                sentence_index,
+                                time.perf_counter() - tts_started_at,
+                            )
                     except Exception as exc:
                         logger.exception("TTS sentence synthesis failed for %r: %s", sentence[:120], exc)
             finally:
@@ -1045,10 +1534,22 @@ async def _build_conversation_audio_stream(
         producer_task = asyncio.create_task(_produce_sentences(), name="llm-sentence-producer")
         synth_task = asyncio.create_task(_synth_sentences(), name="tts-synth-worker")
         try:
+            first_audio_logged = False
+            audio_chunk_count = 0
+            audio_total_bytes = 0
             while True:
                 audio_chunk = await audio_queue.get()
                 if audio_chunk is None:
                     break
+                audio_chunk_count += 1
+                audio_total_bytes += len(audio_chunk)
+                if not first_audio_logged:
+                    first_audio_logged = True
+                    logger.info(
+                        "Conversation first audio chunk after %.3fs bytes=%d",
+                        time.perf_counter() - pipeline_started_at,
+                        len(audio_chunk),
+                    )
                 yield audio_chunk
         finally:
             for task in (producer_task, synth_task):
@@ -1058,6 +1559,13 @@ async def _build_conversation_audio_stream(
 
         assistant_text = _sanitize_spoken_text("".join(assistant_reply_parts))
         session.history.append({"role": "assistant", "content": assistant_text})
+        logger.info(
+            "Conversation audio stream done total=%.3fs audio_chunks=%d audio_bytes=%d reply_chars=%d",
+            time.perf_counter() - pipeline_started_at,
+            audio_chunk_count,
+            audio_total_bytes,
+            len(assistant_text),
+        )
 
     return active_session_id, reachy_actions, _generate_audio()
 
@@ -1111,6 +1619,334 @@ async def conversation(request: Request) -> StreamingResponse:
     )
 
 
+@dataclass
+class _DetectedTurn:
+    turn_id: str
+    audio: NDArray[np.int16]
+
+
+@dataclass
+class _OutboundMessage:
+    kind: str
+    payload: dict[str, Any] | bytes
+
+
+class _ServerConversationState:
+    LISTENING = "LISTENING"
+    THINKING = "THINKING"
+    SPEAKING = "SPEAKING"
+    INTERRUPTING = "INTERRUPTING"
+    RECOVERING = "RECOVERING"
+
+
+class _ConversationStreamRuntime:
+    """Queue-driven runtime for one Reachy websocket connection."""
+
+    def __init__(self, websocket: WebSocket) -> None:
+        self.websocket = websocket
+        self.turn_detector = _StreamingTurnDetector()
+        self.session_id: str | None = None
+        self.voice = _normalise_tts_voice("中文女")
+        self.turn_queue: asyncio.Queue[_DetectedTurn] = asyncio.Queue(maxsize=4)
+        self.outbound_queue: asyncio.Queue[_OutboundMessage] = asyncio.Queue(maxsize=128)
+        self.active_response_task: asyncio.Task[None] | None = None
+        self.active_turn_id: str | None = None
+        self.active_response_id: str | None = None
+        self.client_capabilities: set[str] = set()
+        self.state = _ServerConversationState.LISTENING
+
+    async def run(self) -> None:
+        await self.outbound_queue.put(
+            _OutboundMessage("json", {"type": "ready", "sample_rate": _tts_sample_rate()})
+        )
+        tasks = [
+            asyncio.create_task(self._audio_reader(), name="conversation-ws-audio-reader"),
+            asyncio.create_task(self._turn_worker(), name="conversation-ws-turn-worker"),
+            asyncio.create_task(self._outbound_writer(), name="conversation-ws-outbound-writer"),
+        ]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            if task.cancelled():
+                continue
+            exc = task.exception()
+            if exc is not None:
+                raise exc
+        await self._cancel_active_response("connection_closed")
+
+    async def _send_json(self, payload: dict[str, Any]) -> None:
+        await self.outbound_queue.put(_OutboundMessage("json", payload))
+
+    async def _send_audio(self, payload: bytes) -> None:
+        await self.outbound_queue.put(_OutboundMessage("audio", payload))
+
+    async def _set_state(
+        self,
+        state: str,
+        *,
+        reason: str,
+        turn_id: str | None = None,
+        response_id: str | None = None,
+    ) -> None:
+        if self.state == state:
+            return
+        previous = self.state
+        self.state = state
+        logger.info(
+            "Conversation state %s -> %s reason=%s turn_id=%s response_id=%s",
+            previous,
+            state,
+            reason,
+            turn_id,
+            response_id,
+        )
+        await self._send_json(
+            {
+                "type": "state.changed",
+                "state": state,
+                "previous_state": previous,
+                "reason": reason,
+                "turn_id": turn_id,
+                "response_id": response_id,
+            }
+        )
+
+    async def _audio_reader(self) -> None:
+        while True:
+            message = await self.websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                logger.info("Streaming conversation websocket disconnected")
+                return
+
+            if "text" in message and message["text"] is not None:
+                await self._handle_control_message(message["text"])
+                continue
+
+            raw_bytes = message.get("bytes")
+            if raw_bytes is None:
+                continue
+            pcm = np.frombuffer(raw_bytes, dtype=np.int16)
+            utterance = self.turn_detector.push(pcm)
+            if utterance is None:
+                continue
+
+            turn = _DetectedTurn(turn_id=str(uuid.uuid4()), audio=utterance)
+            if self.turn_queue.full():
+                try:
+                    dropped = self.turn_queue.get_nowait()
+                    logger.info("Dropping queued turn %s because turn queue is full", dropped.turn_id)
+                except asyncio.QueueEmpty:
+                    pass
+            await self.turn_queue.put(turn)
+
+    async def _handle_control_message(self, raw_text: str) -> None:
+        try:
+            data = json.loads(raw_text)
+        except json.JSONDecodeError:
+            return
+
+        msg_type = data.get("type")
+        if msg_type in {"start", "config"}:
+            raw_session_id = data.get("session_id")
+            if isinstance(raw_session_id, str) and raw_session_id.strip():
+                self.session_id = raw_session_id.strip()
+            raw_voice = data.get("voice")
+            if isinstance(raw_voice, str) and raw_voice.strip():
+                self.voice = _normalise_tts_voice(raw_voice.strip())
+            raw_capabilities = data.get("capabilities")
+            if isinstance(raw_capabilities, list):
+                self.client_capabilities = {str(item) for item in raw_capabilities if isinstance(item, str)}
+        elif msg_type == "reset":
+            self.session_id = None
+            self.turn_detector = _StreamingTurnDetector()
+            while not self.turn_queue.empty():
+                try:
+                    self.turn_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            await self._cancel_active_response("session_reset")
+            await self._set_state(_ServerConversationState.LISTENING, reason="session_reset")
+            await self._send_json({"type": "session.reset"})
+        elif msg_type == "interrupt":
+            self.turn_detector = _StreamingTurnDetector()
+            await self._cancel_active_response("client_interrupt")
+        elif msg_type == "action.result":
+            action_call_id = data.get("action_call_id")
+            name = data.get("name")
+            error = data.get("error")
+            result = data.get("result")
+            if error:
+                logger.warning("Reachy action result action_call_id=%s name=%s error=%s", action_call_id, name, error)
+            else:
+                logger.info("Reachy action result action_call_id=%s name=%s result=%s", action_call_id, name, result)
+
+    async def _turn_worker(self) -> None:
+        while True:
+            turn = await self.turn_queue.get()
+            await self._cancel_active_response("new_turn")
+            task = asyncio.create_task(self._process_turn(turn), name=f"conversation-response-{turn.turn_id}")
+            self.active_response_task = task
+            task.add_done_callback(self._on_response_task_done)
+
+    def _on_response_task_done(self, task: asyncio.Task[None]) -> None:
+        if task is not self.active_response_task:
+            return
+        self.active_response_task = None
+        self.active_turn_id = None
+        self.active_response_id = None
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("Response task failed: %s", exc, exc_info=exc)
+
+    async def _cancel_active_response(self, reason: str) -> None:
+        task = self.active_response_task
+        if task is None or task.done():
+            return
+
+        response_id = self.active_response_id
+        turn_id = self.active_turn_id
+        logger.info("Cancelling active response reason=%s turn_id=%s response_id=%s", reason, turn_id, response_id)
+        await self._set_state(
+            _ServerConversationState.INTERRUPTING,
+            reason=reason,
+            turn_id=turn_id,
+            response_id=response_id,
+        )
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if response_id:
+            await self._send_json({"type": "response.cancelled", "response_id": response_id, "reason": reason})
+            await self._send_json({"type": "audio_end", "session_id": self.session_id, "response_id": response_id})
+        self.active_response_task = None
+        self.active_turn_id = None
+        self.active_response_id = None
+        await self._set_state(_ServerConversationState.LISTENING, reason=f"{reason}_done")
+
+    async def _process_turn(self, turn: _DetectedTurn) -> None:
+        if _state.funasr_status != "ready" or _state.funasr is None:
+            await self._send_json({"type": "error", "message": f"ASR model not ready: {_state.funasr_status}"})
+            return
+        if _state.tts_status != "ready" or (_tts_provider() == "cosyvoice" and _state.cosyvoice is None):
+            await self._send_json({"type": "error", "message": f"TTS model not ready: {_state.tts_status}"})
+            return
+        if _state.llm_client is None:
+            await self._send_json({"type": "error", "message": "LLM client not initialised"})
+            return
+
+        await self._send_json({"type": "turn.start", "turn_id": turn.turn_id})
+        try:
+            self.active_turn_id = turn.turn_id
+            await self._set_state(_ServerConversationState.THINKING, reason="turn_started", turn_id=turn.turn_id)
+            user_text = await _transcribe_audio_int16(turn.audio)
+            if not _is_meaningful_transcript(user_text):
+                logger.info("Streaming ASR ignored low-content transcript: %r", user_text)
+                await self._send_json({"type": "ignored", "turn_id": turn.turn_id, "text": user_text})
+                await self._send_json({"type": "turn.ignored", "turn_id": turn.turn_id, "text": user_text})
+                await self._set_state(_ServerConversationState.LISTENING, reason="turn_ignored", turn_id=turn.turn_id)
+                return
+
+            logger.info("Streaming ASR → %r", user_text)
+            await self._send_json({"type": "turn.transcript", "turn_id": turn.turn_id, "text": user_text})
+            response_id = str(uuid.uuid4())
+            self.active_response_id = response_id
+            async def _on_sentence(sentence: str) -> None:
+                await self._send_json(
+                    {"type": "response.sentence", "response_id": response_id, "turn_id": turn.turn_id, "text": sentence}
+                )
+
+            self.session_id, reachy_actions, audio_stream = await _build_conversation_audio_stream(
+                user_text,
+                self.session_id,
+                self.voice,
+                on_sentence=_on_sentence,
+            )
+            use_action_events = "action.call" in self.client_capabilities
+            user_payload = {
+                "type": "user_text",
+                "text": user_text,
+                "session_id": self.session_id,
+                "turn_id": turn.turn_id,
+                "response_id": response_id,
+                "actions": [] if use_action_events else reachy_actions,
+            }
+            await self._send_json(user_payload)
+            await self._send_json(
+                {
+                    "type": "response.start",
+                    "session_id": self.session_id,
+                    "turn_id": turn.turn_id,
+                    "response_id": response_id,
+                }
+            )
+            if use_action_events:
+                for index, action in enumerate(reachy_actions):
+                    logger.info("Sending remote action call: %s", action)
+                    await self._send_json(
+                        {
+                            "type": "action.call",
+                            "response_id": response_id,
+                            "turn_id": turn.turn_id,
+                            "action_call_id": f"{response_id}-action-{index}",
+                            **action,
+                        }
+                    )
+            await self._send_json(
+                {"type": "audio_start", "sample_rate": _tts_sample_rate(), "response_id": response_id}
+            )
+            await self._send_json(
+                {"type": "response.audio.start", "sample_rate": _tts_sample_rate(), "response_id": response_id}
+            )
+            await self._set_state(
+                _ServerConversationState.SPEAKING,
+                reason="audio_start",
+                turn_id=turn.turn_id,
+                response_id=response_id,
+            )
+            async for audio_chunk in audio_stream:
+                if audio_chunk:
+                    await self._send_audio(audio_chunk)
+            await self._send_json({"type": "audio_end", "session_id": self.session_id, "response_id": response_id})
+            await self._send_json({"type": "response.done", "session_id": self.session_id, "response_id": response_id})
+            await self._set_state(
+                _ServerConversationState.LISTENING,
+                reason="response_done",
+                turn_id=turn.turn_id,
+                response_id=response_id,
+            )
+        except asyncio.CancelledError:
+            logger.info("Response task cancelled for turn_id=%s response_id=%s", turn.turn_id, self.active_response_id)
+            raise
+        except HTTPException as exc:
+            await self._send_json({"type": "error", "turn_id": turn.turn_id, "message": str(exc.detail)})
+            await self._set_state(
+                _ServerConversationState.LISTENING,
+                reason="http_error",
+                turn_id=turn.turn_id,
+                response_id=self.active_response_id,
+            )
+        except Exception as exc:
+            logger.exception("Streaming conversation turn failed: %s", exc)
+            await self._send_json({"type": "error", "turn_id": turn.turn_id, "message": str(exc)})
+            await self._set_state(
+                _ServerConversationState.LISTENING,
+                reason="turn_error",
+                turn_id=turn.turn_id,
+                response_id=self.active_response_id,
+            )
+
+    async def _outbound_writer(self) -> None:
+        while True:
+            message = await self.outbound_queue.get()
+            if message.kind == "audio":
+                await self.websocket.send_bytes(message.payload)  # type: ignore[arg-type]
+            else:
+                await self.websocket.send_json(message.payload)
+
+
 @app.websocket("/conversation/ws")
 async def conversation_stream(websocket: WebSocket) -> None:
     """Continuous PCM stream endpoint.
@@ -1119,84 +1955,9 @@ async def conversation_stream(websocket: WebSocket) -> None:
     turn detection, ASR, LLM, TTS, and streams response PCM back on the same socket.
     """
     await websocket.accept()
-    turn_detector = _StreamingTurnDetector()
-    session_id: str | None = None
-    voice = _normalise_tts_voice("中文女")
-
-    await websocket.send_json({"type": "ready", "sample_rate": _tts_sample_rate()})
-
+    runtime = _ConversationStreamRuntime(websocket)
     try:
-        while True:
-            message = await websocket.receive()
-            if message.get("type") == "websocket.disconnect":
-                break
-            if "text" in message and message["text"] is not None:
-                try:
-                    data = json.loads(message["text"])
-                except json.JSONDecodeError:
-                    continue
-                if data.get("type") in {"start", "config"}:
-                    raw_session_id = data.get("session_id")
-                    if isinstance(raw_session_id, str) and raw_session_id.strip():
-                        session_id = raw_session_id.strip()
-                    raw_voice = data.get("voice")
-                    if isinstance(raw_voice, str) and raw_voice.strip():
-                        voice = _normalise_tts_voice(raw_voice.strip())
-                elif data.get("type") == "reset":
-                    session_id = None
-                    turn_detector = _StreamingTurnDetector()
-                continue
-
-            raw_bytes = message.get("bytes")
-            if raw_bytes is None:
-                continue
-            if _state.funasr_status != "ready" or _state.funasr is None:
-                await websocket.send_json({"type": "error", "message": f"ASR model not ready: {_state.funasr_status}"})
-                continue
-            if _state.tts_status != "ready" or (_tts_provider() == "cosyvoice" and _state.cosyvoice is None):
-                await websocket.send_json({"type": "error", "message": f"TTS model not ready: {_state.tts_status}"})
-                continue
-            if _state.llm_client is None:
-                await websocket.send_json({"type": "error", "message": "LLM client not initialised"})
-                continue
-
-            pcm = np.frombuffer(raw_bytes, dtype=np.int16)
-            utterance = turn_detector.push(pcm)
-            if utterance is None:
-                continue
-
-            try:
-                user_text = await _transcribe_audio_int16(utterance)
-                if not _is_meaningful_transcript(user_text):
-                    logger.info("Streaming ASR ignored low-content transcript: %r", user_text)
-                    await websocket.send_json({"type": "ignored", "text": user_text})
-                    continue
-                logger.info("Streaming ASR → %r", user_text)
-                session_id, reachy_actions, audio_stream = await _build_conversation_audio_stream(
-                    user_text,
-                    session_id,
-                    voice,
-                )
-                await websocket.send_json(
-                    {
-                        "type": "user_text",
-                        "text": user_text,
-                        "session_id": session_id,
-                        "actions": reachy_actions,
-                    }
-                )
-                await websocket.send_json({"type": "audio_start", "sample_rate": _tts_sample_rate()})
-                async for audio_chunk in audio_stream:
-                    if audio_chunk:
-                        await websocket.send_bytes(audio_chunk)
-                await websocket.send_json({"type": "audio_end", "session_id": session_id})
-            except HTTPException as exc:
-                await websocket.send_json({"type": "error", "message": str(exc.detail)})
-            except WebSocketDisconnect:
-                raise
-            except Exception as exc:
-                logger.exception("Streaming conversation turn failed: %s", exc)
-                await websocket.send_json({"type": "error", "message": str(exc)})
+        await runtime.run()
     except WebSocketDisconnect:
         logger.info("Streaming conversation websocket disconnected")
 

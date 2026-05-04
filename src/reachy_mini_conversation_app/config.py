@@ -298,6 +298,18 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return default
 
 
+def _env_float(name: str, default: float) -> float:
+    """Parse a floating-point environment value with a safe fallback."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid float value for %s=%r, using default=%s", name, raw, default)
+        return default
+
+
 def _normalize_hf_connection_mode(value: str | None) -> str | None:
     """Normalize the Hugging Face connection mode, if explicitly configured."""
     candidate = (value or "").strip().lower()
@@ -468,12 +480,20 @@ class Config:
     # Mac inference server TTS provider: "cosyvoice" (local) or "edge" (online, faster/more natural).
     INFERENCE_TTS_PROVIDER = os.getenv("INFERENCE_TTS_PROVIDER", "cosyvoice")
     EDGE_TTS_VOICE = os.getenv("EDGE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
+    REACHY_AGENT_TOOLS_ENABLED = _env_flag("REACHY_AGENT_TOOLS_ENABLED", True)
     REACHY_ACTION_PLANNER_ENABLED = _env_flag("REACHY_ACTION_PLANNER_ENABLED", True)
     REACHY_ACTION_PLANNER_TIMEOUT = float(os.getenv("REACHY_ACTION_PLANNER_TIMEOUT", "0.8"))
+    FAST_RESPONSE_ENABLED = _env_flag("FAST_RESPONSE_ENABLED", True)
+    FAST_RESPONSE_TIMEOUT = float(os.getenv("FAST_RESPONSE_TIMEOUT", "1.2"))
+    FAST_RESPONSE_TEXT = os.getenv("FAST_RESPONSE_TEXT", "我想想。")
+    FAST_ACTION_REPLY_ENABLED = _env_flag("FAST_ACTION_REPLY_ENABLED", True)
 
     # OpenAI-compatible local agent/server: OpenClaw, Ollama, LM Studio, vLLM, etc.
     OPENAI_COMPAT_API_URL = os.getenv("OPENAI_COMPAT_API_URL", "http://localhost:11434/v1")
     OPENAI_COMPAT_API_KEY = os.getenv("OPENAI_COMPAT_API_KEY", "ollama")
+    OPENAI_COMPAT_SESSION_MODE = os.getenv("OPENAI_COMPAT_SESSION_MODE", "auto")
+    OPENAI_COMPAT_SESSION_KEY = os.getenv("OPENAI_COMPAT_SESSION_KEY", "reachy-mini")
+    OPENAI_COMPAT_MESSAGE_CHANNEL = os.getenv("OPENAI_COMPAT_MESSAGE_CHANNEL", "reachy-mini")
 
     # Remote backend: unified conversation service URL (Mac inference server).
     # Pi 4 sends audio here and receives synthesised audio back; all AI runs on Mac.
@@ -483,6 +503,15 @@ class Config:
     # CONVERSATION_SERVICE_URL as ws://<mac-ip>:8765/conversation/ws.
     CONVERSATION_STREAM_URL = os.getenv("CONVERSATION_STREAM_URL")
     REMOTE_AUDIO_STREAMING = _env_flag("REMOTE_AUDIO_STREAMING", True)
+    REMOTE_CONVERSATION_SESSION_ID = os.getenv("REMOTE_CONVERSATION_SESSION_ID")
+    STREAM_VAD_RMS_THRESHOLD = _env_float("STREAM_VAD_RMS_THRESHOLD", 650.0)
+    STREAM_VAD_NOISE_MARGIN = _env_float("STREAM_VAD_NOISE_MARGIN", 420.0)
+    STREAM_VAD_CONTINUE_RATIO = _env_float("STREAM_VAD_CONTINUE_RATIO", 0.72)
+    STREAM_VAD_SILENCE_SECONDS = _env_float("STREAM_VAD_SILENCE_SECONDS", 0.95)
+    STREAM_VAD_LONG_SILENCE_SECONDS = _env_float("STREAM_VAD_LONG_SILENCE_SECONDS", 1.25)
+    REMOTE_BARGE_IN_RMS_THRESHOLD = _env_float("REMOTE_BARGE_IN_RMS_THRESHOLD", 1400.0)
+    REMOTE_BARGE_IN_SECONDS = _env_float("REMOTE_BARGE_IN_SECONDS", 0.22)
+    REMOTE_BARGE_IN_PRE_ROLL_SECONDS = _env_float("REMOTE_BARGE_IN_PRE_ROLL_SECONDS", 0.45)
 
     # Remote inference service URLs (used by funasr_pipeline when running on Pi 4).
     # When set, the pipeline calls these HTTP endpoints instead of loading local models.
@@ -607,13 +636,30 @@ def refresh_runtime_config_from_env() -> None:
     config.COSYVOICE_MODEL_DIR = os.getenv("COSYVOICE_MODEL_DIR", "pretrained_models/CosyVoice2-0.5B")
     config.INFERENCE_TTS_PROVIDER = os.getenv("INFERENCE_TTS_PROVIDER", "cosyvoice")
     config.EDGE_TTS_VOICE = os.getenv("EDGE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
+    config.REACHY_AGENT_TOOLS_ENABLED = _env_flag("REACHY_AGENT_TOOLS_ENABLED", True)
     config.REACHY_ACTION_PLANNER_ENABLED = _env_flag("REACHY_ACTION_PLANNER_ENABLED", True)
     config.REACHY_ACTION_PLANNER_TIMEOUT = float(os.getenv("REACHY_ACTION_PLANNER_TIMEOUT", "0.8"))
+    config.FAST_RESPONSE_ENABLED = _env_flag("FAST_RESPONSE_ENABLED", True)
+    config.FAST_RESPONSE_TIMEOUT = float(os.getenv("FAST_RESPONSE_TIMEOUT", "1.2"))
+    config.FAST_RESPONSE_TEXT = os.getenv("FAST_RESPONSE_TEXT", "我想想。")
+    config.FAST_ACTION_REPLY_ENABLED = _env_flag("FAST_ACTION_REPLY_ENABLED", True)
     config.OPENAI_COMPAT_API_URL = os.getenv("OPENAI_COMPAT_API_URL", "http://localhost:11434/v1")
     config.OPENAI_COMPAT_API_KEY = os.getenv("OPENAI_COMPAT_API_KEY", "ollama")
+    config.OPENAI_COMPAT_SESSION_MODE = os.getenv("OPENAI_COMPAT_SESSION_MODE", "auto")
+    config.OPENAI_COMPAT_SESSION_KEY = os.getenv("OPENAI_COMPAT_SESSION_KEY", "reachy-mini")
+    config.OPENAI_COMPAT_MESSAGE_CHANNEL = os.getenv("OPENAI_COMPAT_MESSAGE_CHANNEL", "reachy-mini")
     config.CONVERSATION_SERVICE_URL = os.getenv("CONVERSATION_SERVICE_URL")
     config.CONVERSATION_STREAM_URL = os.getenv("CONVERSATION_STREAM_URL")
     config.REMOTE_AUDIO_STREAMING = _env_flag("REMOTE_AUDIO_STREAMING", True)
+    config.REMOTE_CONVERSATION_SESSION_ID = os.getenv("REMOTE_CONVERSATION_SESSION_ID")
+    config.STREAM_VAD_RMS_THRESHOLD = _env_float("STREAM_VAD_RMS_THRESHOLD", 650.0)
+    config.STREAM_VAD_NOISE_MARGIN = _env_float("STREAM_VAD_NOISE_MARGIN", 420.0)
+    config.STREAM_VAD_CONTINUE_RATIO = _env_float("STREAM_VAD_CONTINUE_RATIO", 0.72)
+    config.STREAM_VAD_SILENCE_SECONDS = _env_float("STREAM_VAD_SILENCE_SECONDS", 0.95)
+    config.STREAM_VAD_LONG_SILENCE_SECONDS = _env_float("STREAM_VAD_LONG_SILENCE_SECONDS", 1.25)
+    config.REMOTE_BARGE_IN_RMS_THRESHOLD = _env_float("REMOTE_BARGE_IN_RMS_THRESHOLD", 1400.0)
+    config.REMOTE_BARGE_IN_SECONDS = _env_float("REMOTE_BARGE_IN_SECONDS", 0.22)
+    config.REMOTE_BARGE_IN_PRE_ROLL_SECONDS = _env_float("REMOTE_BARGE_IN_PRE_ROLL_SECONDS", 0.45)
     config.FUNASR_SERVICE_URL = os.getenv("FUNASR_SERVICE_URL")
     config.TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL")
     config.INFERENCE_SERVER_HOST = os.getenv("INFERENCE_SERVER_HOST", "0.0.0.0")
