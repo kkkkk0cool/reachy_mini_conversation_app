@@ -1280,11 +1280,17 @@ async def _build_conversation_audio_stream(
     session_id: str | None,
     voice: str,
     on_sentence: Callable[[str], Awaitable[None]] | None = None,
+    preselected_actions: list[dict[str, object]] | None = None,
+    preselected_action_source: str = "",
 ) -> tuple[str, list[dict[str, object]], AsyncIterator[bytes]]:
-    action_source = ""
-    reachy_actions = _infer_reachy_actions_from_user_text(user_text)
+    action_source = preselected_action_source
+    reachy_actions = list(preselected_actions or [])
     if reachy_actions:
-        action_source = "heuristic"
+        action_source = action_source or "preselected"
+    if not reachy_actions:
+        reachy_actions = _infer_reachy_actions_from_user_text(user_text)
+        if reachy_actions:
+            action_source = "heuristic"
     should_try_action_planners = not reachy_actions and _may_be_reachy_action_request(user_text)
     if not reachy_actions and should_try_action_planners:
         reachy_actions = await _plan_reachy_actions_with_agent_tools(user_text)
@@ -1902,6 +1908,35 @@ class _ConversationStreamRuntime:
             await self._send_json({"type": "turn.transcript", "turn_id": turn.turn_id, "text": user_text})
             response_id = str(uuid.uuid4())
             self.active_response_id = response_id
+
+            early_reachy_actions = _infer_reachy_actions_from_user_text(user_text)
+            early_actions_sent = False
+            use_action_events = "action.call" in self.client_capabilities
+            if early_reachy_actions:
+                logger.info("Reachy actions selected early by heuristic: %s", early_reachy_actions)
+                user_payload = {
+                    "type": "user_text",
+                    "text": user_text,
+                    "session_id": self.session_id,
+                    "turn_id": turn.turn_id,
+                    "response_id": response_id,
+                    "actions": [] if use_action_events else early_reachy_actions,
+                }
+                await self._send_json(user_payload)
+                if use_action_events:
+                    for index, action in enumerate(early_reachy_actions):
+                        logger.info("Sending early remote action call: %s", action)
+                        await self._send_json(
+                            {
+                                "type": "action.call",
+                                "response_id": response_id,
+                                "turn_id": turn.turn_id,
+                                "action_call_id": f"{response_id}-action-{index}",
+                                **action,
+                            }
+                        )
+                early_actions_sent = True
+
             async def _on_sentence(sentence: str) -> None:
                 await self._send_json(
                     {"type": "response.sentence", "response_id": response_id, "turn_id": turn.turn_id, "text": sentence}
@@ -1912,17 +1947,19 @@ class _ConversationStreamRuntime:
                 self.session_id,
                 self.voice,
                 on_sentence=_on_sentence,
+                preselected_actions=early_reachy_actions,
+                preselected_action_source="heuristic" if early_reachy_actions else "",
             )
-            use_action_events = "action.call" in self.client_capabilities
-            user_payload = {
-                "type": "user_text",
-                "text": user_text,
-                "session_id": self.session_id,
-                "turn_id": turn.turn_id,
-                "response_id": response_id,
-                "actions": [] if use_action_events else reachy_actions,
-            }
-            await self._send_json(user_payload)
+            if not early_actions_sent:
+                user_payload = {
+                    "type": "user_text",
+                    "text": user_text,
+                    "session_id": self.session_id,
+                    "turn_id": turn.turn_id,
+                    "response_id": response_id,
+                    "actions": [] if use_action_events else reachy_actions,
+                }
+                await self._send_json(user_payload)
             await self._send_json(
                 {
                     "type": "response.start",
@@ -1931,7 +1968,7 @@ class _ConversationStreamRuntime:
                     "response_id": response_id,
                 }
             )
-            if use_action_events:
+            if use_action_events and not early_actions_sent:
                 for index, action in enumerate(reachy_actions):
                     logger.info("Sending remote action call: %s", action)
                     await self._send_json(
